@@ -1,0 +1,463 @@
+package dev.ywsabc.lasttrain.mission;
+
+import dev.ywsabc.lasttrain.LastTrain;
+import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.route.RouteDirector;
+import dev.ywsabc.lasttrain.route.RouteGeometry;
+import java.util.List;
+import java.util.Optional;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Container;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.phys.AABB;
+
+/**
+ * Materializes mission state into ordinary server-authoritative world
+ * interactions and observes completion from the world.
+ */
+public final class MissionWorldDirector {
+    private static final int UPDATE_ALL = 3;
+    private static final int TICK_INTERVAL = 10;
+    private static final String MISSION_ENTITY_TAG_PREFIX = "lasttrain_mission_";
+
+    private MissionWorldDirector() {
+    }
+
+    public static void tick(MinecraftServer server, CampaignSavedData data, int serverTick) {
+        if (serverTick % TICK_INTERVAL != 0) {
+            return;
+        }
+
+        ActiveMission mission = data.activeMission();
+        if (mission == null) {
+            return;
+        }
+
+        if (mission.site() == null) {
+            data.assignMissionSite(RouteDirector.missionAnchor(data, mission.routeSegment()));
+            mission = data.activeMission();
+        }
+        BlockPos site = mission.site();
+        int requiredSegment = RouteGeometry.missionSegment(mission.routeSegment());
+        if (site == null
+                || data.generatedRouteSegment() < requiredSegment
+                || !server.overworld().hasChunkAt(site)) {
+            return;
+        }
+
+        if (!mission.worldPrepared()) {
+            if (!prepare(server.overworld(), mission)) {
+                return;
+            }
+            data.markMissionWorldPrepared();
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.translatable(
+                            "message.lasttrain.mission_site",
+                            site.getX(),
+                            site.getY(),
+                            site.getZ()),
+                    false);
+            mission = data.activeMission();
+        }
+
+        if (mission.stage() != MissionStage.ACTIVE) {
+            return;
+        }
+        if (mission.type() == MissionType.ZOMBIE_BLOCKADE
+                && !hasNearbyPlayer(server.overworld(), site)) {
+            return;
+        }
+
+        int observed = observeProgress(server.overworld(), mission);
+        MissionStage before = mission.stage();
+        if (data.setMissionObservedProgress(observed)
+                && before != MissionStage.READY_TO_TURN_IN
+                && mission.stage() == MissionStage.READY_TO_TURN_IN) {
+            resolveRouteBarrier(server.overworld(), mission);
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.translatable(
+                            "message.lasttrain.mission_ready",
+                            Component.translatable(
+                                    "mission.lasttrain." + mission.type().serializedName())),
+                    false);
+        }
+    }
+
+    private static boolean prepare(ServerLevel level, ActiveMission mission) {
+        try {
+            buildMissionApron(level, mission.site());
+            return switch (mission.type()) {
+                case RAIL_BREAK -> prepareRailBreak(level, mission);
+                case STATION_POWER -> prepareStationPower(level, mission);
+                case STATION_GATE -> prepareStationGate(level, mission);
+                case SUPPLY_RECOVERY -> prepareSupplyRecovery(level, mission);
+                case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, mission);
+            };
+        } catch (RuntimeException exception) {
+            LastTrain.LOGGER.error(
+                    "Could not prepare mission {} at {}",
+                    mission.id(),
+                    mission.site(),
+                    exception);
+            return false;
+        }
+    }
+
+    private static int observeProgress(ServerLevel level, ActiveMission mission) {
+        return switch (mission.type()) {
+            case RAIL_BREAK -> observeRailRepair(level, mission);
+            case STATION_POWER -> observePoweredLevers(level, mission);
+            case STATION_GATE -> observeOpenDoors(level, mission);
+            case SUPPLY_RECOVERY -> observeRecoveredBarrels(level, mission);
+            case ZOMBIE_BLOCKADE -> observeDefeatedZombies(level, mission);
+        };
+    }
+
+    private static void buildMissionApron(ServerLevel level, BlockPos site) {
+        BlockPos floor = site.below();
+        for (int x = -5; x <= 5; x++) {
+            for (int z = -7; z <= 7; z++) {
+                if (Math.abs(z) <= 1) {
+                    continue;
+                }
+                level.setBlock(
+                        floor.offset(x, 0, z),
+                        Blocks.STONE_BRICKS.defaultBlockState(),
+                        UPDATE_ALL);
+            }
+        }
+    }
+
+    private static boolean prepareRailBreak(ServerLevel level, ActiveMission mission) {
+        BlockPos site = mission.site();
+        for (int offset = -1; offset <= 1; offset++) {
+            BlockPos track = site.offset(offset, 0, 0);
+            level.setBlock(track, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+            level.setBlock(
+                    track.below(),
+                    Blocks.RED_CONCRETE.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+        return true;
+    }
+
+    private static boolean prepareStationPower(ServerLevel level, ActiveMission mission) {
+        int[] offsets = {-3, -1, 1, 3};
+        for (int offset : offsets) {
+            BlockPos base = mission.site().offset(offset, -1, 4);
+            level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
+            level.setBlock(
+                    base.above(),
+                    state(
+                            Blocks.LEVER,
+                            "face", "floor",
+                            "facing", "north",
+                            "powered", "false"),
+                    UPDATE_ALL);
+            level.setBlock(
+                    base.offset(0, 0, 1),
+                    Blocks.REDSTONE_LAMP.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+        prepareRouteBarrier(level, mission.site());
+        return true;
+    }
+
+    private static boolean prepareStationGate(ServerLevel level, ActiveMission mission) {
+        int[] offsets = {-1, 1};
+        for (int index = 0; index < offsets.length; index++) {
+            BlockPos lower = mission.site().offset(offsets[index], 0, 4);
+            level.setBlock(
+                    lower,
+                    state(
+                            Blocks.IRON_DOOR,
+                            "facing", "east",
+                            "half", "lower",
+                            "hinge", index == 0 ? "left" : "right",
+                            "open", "false",
+                            "powered", "false"),
+                    UPDATE_ALL);
+            level.setBlock(
+                    lower.above(),
+                    state(
+                            Blocks.IRON_DOOR,
+                            "facing", "east",
+                            "half", "upper",
+                            "hinge", index == 0 ? "left" : "right",
+                            "open", "false",
+                            "powered", "false"),
+                    UPDATE_ALL);
+            level.setBlock(
+                    lower.offset(0, 0, -1),
+                    state(
+                            Blocks.LEVER,
+                            "face", "floor",
+                            "facing", "north",
+                            "powered", "false"),
+                    UPDATE_ALL);
+        }
+        prepareRouteBarrier(level, mission.site());
+        return true;
+    }
+
+    private static boolean prepareSupplyRecovery(ServerLevel level, ActiveMission mission) {
+        net.minecraft.world.item.Item[] supplies = {
+            Items.IRON_INGOT,
+            Items.BREAD,
+            Items.REDSTONE,
+            Items.CHARCOAL,
+            Items.ARROW
+        };
+        int[] counts = {4, 8, 8, 8, 16};
+        for (int index = 0; index < supplies.length; index++) {
+            BlockPos barrelPos = mission.site().offset(index - 2, 0, 4);
+            level.setBlock(barrelPos, Blocks.BARREL.defaultBlockState(), UPDATE_ALL);
+            BlockEntity blockEntity = level.getBlockEntity(barrelPos);
+            if (!(blockEntity instanceof Container barrel)) {
+                return false;
+            }
+            barrel.clearContent();
+            barrel.setItem(0, new ItemStack(supplies[index], counts[index]));
+            blockEntity.setChanged();
+        }
+        return true;
+    }
+
+    private static boolean prepareZombieBlockade(ServerLevel level, ActiveMission mission) {
+        String tag = missionEntityTag(mission);
+        AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
+        int existing = level.getEntitiesOfClass(
+                        Zombie.class,
+                        bounds,
+                        zombie -> zombie.getTags().contains(tag))
+                .size();
+
+        for (int index = existing; index < mission.target(); index++) {
+            Zombie zombie = EntityType.ZOMBIE.create(level);
+            if (zombie == null) {
+                return false;
+            }
+            int side = (index & 1) == 0 ? -1 : 1;
+            int xOffset = (index % 6) - 3;
+            BlockPos spawn = mission.site().offset(xOffset, 0, side * 5);
+            zombie.moveTo(
+                    spawn.getX() + 0.5D,
+                    spawn.getY(),
+                    spawn.getZ() + 0.5D,
+                    side < 0 ? 0.0F : 180.0F,
+                    0.0F);
+            zombie.setPersistenceRequired();
+            zombie.addTag(tag);
+            if (!level.addFreshEntity(zombie)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int observeRailRepair(ServerLevel level, ActiveMission mission) {
+        Block track = registeredBlock("create:track");
+        int repaired = 0;
+        for (int offset = -1; offset <= 1; offset++) {
+            if (level.getBlockState(mission.site().offset(offset, 0, 0)).is(track)) {
+                repaired++;
+            }
+        }
+        return repaired;
+    }
+
+    private static int observePoweredLevers(ServerLevel level, ActiveMission mission) {
+        int powered = 0;
+        for (int offset : new int[]{-3, -1, 1, 3}) {
+            BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
+            if (state.is(Blocks.LEVER) && propertyIs(state, "powered", "true")) {
+                powered++;
+            }
+        }
+        return powered;
+    }
+
+    private static int observeOpenDoors(ServerLevel level, ActiveMission mission) {
+        int opened = 0;
+        for (int offset : new int[]{-1, 1}) {
+            BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
+            if (state.is(Blocks.IRON_DOOR) && propertyIs(state, "open", "true")) {
+                opened++;
+            }
+        }
+        return opened;
+    }
+
+    private static int observeRecoveredBarrels(ServerLevel level, ActiveMission mission) {
+        int recovered = 0;
+        for (int index = 0; index < 5; index++) {
+            BlockEntity blockEntity =
+                    level.getBlockEntity(mission.site().offset(index - 2, 0, 4));
+            if (!(blockEntity instanceof Container barrel) || barrel.isEmpty()) {
+                recovered++;
+            }
+        }
+        return recovered;
+    }
+
+    private static int observeDefeatedZombies(ServerLevel level, ActiveMission mission) {
+        String tag = missionEntityTag(mission);
+        AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
+        List<Zombie> remaining = level.getEntitiesOfClass(
+                Zombie.class,
+                bounds,
+                zombie -> zombie.isAlive() && zombie.getTags().contains(tag));
+        return mission.target() - remaining.size();
+    }
+
+    public static void clearMissionWorld(ServerLevel level, ActiveMission mission) {
+        if (mission == null || mission.site() == null || !level.hasChunkAt(mission.site())) {
+            return;
+        }
+        switch (mission.type()) {
+            case RAIL_BREAK -> {
+                Block track = registeredBlock("create:track");
+                for (int offset = -1; offset <= 1; offset++) {
+                    level.setBlock(
+                            mission.site().offset(offset, 0, 0),
+                            track.defaultBlockState(),
+                            UPDATE_ALL);
+                    level.setBlock(
+                            mission.site().offset(offset, -1, 0),
+                            Blocks.POLISHED_ANDESITE.defaultBlockState(),
+                            UPDATE_ALL);
+                }
+            }
+            case STATION_POWER, STATION_GATE -> resolveRouteBarrier(level, mission);
+            case ZOMBIE_BLOCKADE -> {
+                String tag = missionEntityTag(mission);
+                AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
+                level.getEntitiesOfClass(
+                                Zombie.class,
+                                bounds,
+                                zombie -> zombie.getTags().contains(tag))
+                        .forEach(Zombie::discard);
+            }
+            case SUPPLY_RECOVERY -> {
+                // Recovered supply barrels remain as ordinary station loot.
+            }
+        }
+    }
+
+    private static void prepareRouteBarrier(ServerLevel level, BlockPos site) {
+        for (int y = 0; y <= 2; y++) {
+            for (int z = -2; z <= 2; z++) {
+                level.setBlock(
+                        site.offset(0, y, z),
+                        Blocks.IRON_BARS.defaultBlockState(),
+                        UPDATE_ALL);
+            }
+        }
+        level.setBlock(
+                site.below(),
+                Blocks.RED_CONCRETE.defaultBlockState(),
+                UPDATE_ALL);
+    }
+
+    private static void resolveRouteBarrier(ServerLevel level, ActiveMission mission) {
+        BlockPos site = mission.site();
+        if (site == null) {
+            return;
+        }
+        for (int y = 0; y <= 2; y++) {
+            for (int z = -2; z <= 2; z++) {
+                BlockPos pos = site.offset(0, y, z);
+                if (level.getBlockState(pos).is(Blocks.IRON_BARS)) {
+                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                }
+            }
+        }
+        Block track = registeredBlock("create:track");
+        if (track != Blocks.AIR) {
+            level.setBlock(site, track.defaultBlockState(), UPDATE_ALL);
+            level.setBlock(
+                    site.below(),
+                    Blocks.POLISHED_ANDESITE.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+    }
+
+    private static boolean hasNearbyPlayer(ServerLevel level, BlockPos site) {
+        double maxDistanceSquared = 96.0D * 96.0D;
+        for (ServerPlayer player : level.players()) {
+            if (player.isSpectator()) {
+                continue;
+            }
+            double dx = player.getX() - (site.getX() + 0.5D);
+            double dy = player.getY() - (site.getY() + 0.5D);
+            double dz = player.getZ() - (site.getZ() + 0.5D);
+            if (dx * dx + dy * dy + dz * dz <= maxDistanceSquared) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String missionEntityTag(ActiveMission mission) {
+        return MISSION_ENTITY_TAG_PREFIX + mission.id();
+    }
+
+    private static Block registeredBlock(String id) {
+        ResourceLocation key = ResourceLocation.parse(id);
+        return BuiltInRegistries.BLOCK.containsKey(key)
+                ? BuiltInRegistries.BLOCK.get(key)
+                : Blocks.AIR;
+    }
+
+    private static BlockState state(Block block, String... propertyPairs) {
+        BlockState state = block.defaultBlockState();
+        for (int index = 0; index < propertyPairs.length; index += 2) {
+            String name = propertyPairs[index];
+            String value = propertyPairs[index + 1];
+            Property<?> property = state.getProperties().stream()
+                    .filter(candidate -> candidate.getName().equals(name))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            block + " has no block-state property " + name));
+            state = applyProperty(state, property, value);
+        }
+        return state;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static BlockState applyProperty(BlockState state, Property property, String value) {
+        Optional<? extends Comparable> parsed = property.getValue(value);
+        return parsed.map(candidate -> state.setValue(property, candidate))
+                .orElseThrow(() -> new IllegalArgumentException(
+                        property.getName() + " rejects value " + value));
+    }
+
+    private static boolean propertyIs(BlockState state, String name, String expected) {
+        for (Property<?> property : state.getProperties()) {
+            if (property.getName().equals(name)) {
+                return serializedPropertyValue(state, property).equals(expected);
+            }
+        }
+        return false;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static String serializedPropertyValue(BlockState state, Property property) {
+        Comparable value = state.getValue(property);
+        return property.getName(value);
+    }
+}

@@ -1,7 +1,9 @@
-* text=auto
-*.java text eol=lf
-*.gradle text eol=lf
-*.properties text eol=lf
-*.md text eol=lf
+# Packwiz hashes file bytes. Disable checkout-time newline rewriting so a
+# Windows clone installs the exact same indexed content as CI and Linux.
+* -text
+# Gradle's generated launchers use platform-specific line endings and are not
+# part of the Packwiz hash tree.
+gradlew text eol=lf
+gradlew.bat text eol=crlf
 *.png binary
 *.jar binary

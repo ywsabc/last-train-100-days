@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Presence-only fixture. The mock Simurail verifier does not extract archives.
+exit 0

@@ -1,0 +1,159 @@
+hash-format = "sha256"
+
+[[files]]
+file = "config/hordes-common.toml"
+hash = "e520ceaf74f2afdd30336454fce8ae2fcfb41542fbf5497c9fda6911cdb3c452"
+
+[[files]]
+file = "config/incontrol/spawn.json"
+hash = "6c1b4bf823b6ecbfe46ff7ace9342c96d75e62d2ef1f86497e51ad94cc79c288"
+
+[[files]]
+file = "config/incontrol/spawner.json"
+hash = "d257804069fa5d579fa1fa3e0126ca5b75a35f47cfecf43dcbf1a7293e3414a9"
+
+[[files]]
+file = "config/lostcities/profiles/lasttrain.json"
+hash = "52886a0e8da53b13b67efd3ffaba8ec2b47f957704c470028f526b7ca23a314c"
+
+[[files]]
+file = "config/tacz-common.toml"
+hash = "90b8c913dc13fbe3a8b868305716b011c60be492ff2a7131fa4f0dea39a434f6"
+
+[[files]]
+file = "config/tongdarailway-common.toml"
+hash = "decb509a7b0a2d3c272beeb2497006f4346034ff3f309279f3c5878e45dc300c"
+
+[[files]]
+file = "defaultconfigs/incontrol-server.toml"
+hash = "ef9308954de8c022bef6be55a620707cb3aec04237e159546f01c342c59af76f"
+
+[[files]]
+file = "defaultconfigs/lostcities-server.toml"
+hash = "be2760bc512aeb755b48bda5abfb7914fa0ad5ffe26d6fda77f0ab1023d54b37"
+
+[[files]]
+file = "defaultconfigs/tacz-server.toml"
+hash = "4ba2d36951f694c8400fa90f6236d7632f8b37c6c7c6d1475705593ea61faffc"
+
+[[files]]
+file = "kubejs/data/hordes/horde_data/tables/default.json"
+hash = "15740938f4d0f0d0d1601760cd09e2201717a8f84cede9556755ae87b6a16380"
+
+[[files]]
+file = "kubejs/server_scripts/lasttrain_recipes.js"
+hash = "ada5d0a6b8719a4f93471b837fefa7d8531e5acc76b8a8505540fb0d9c99417e"
+
+[[files]]
+file = "kubejs/startup_scripts/lasttrain_bootstrap.js"
+hash = "7a73012e688a9cbf0c642369891a4c5e8c1b08dd18467628a3a6a98be0a8a219"
+
+[[files]]
+file = "mods/atlas-lib.pw.toml"
+hash = "57d314558add15212267a2a73439def174a8d8179e3cbd6abf8926f23fbca2e5"
+metafile = true
+
+[[files]]
+file = "mods/coroutil.pw.toml"
+hash = "8ff227007d3ea2f499193f04410000892bcc35b87572ae74d3f19494c6572368"
+metafile = true
+
+[[files]]
+file = "mods/corpse.pw.toml"
+hash = "8e671fbd3a5460a61073cced391ec08efc6b67d765e49015eea45a1f1db159a0"
+metafile = true
+
+[[files]]
+file = "mods/create-aeronautics.pw.toml"
+hash = "5fab8d2e412683dfd72f08cf6750e51b03cb43192e8eb783e962ba28d20978bc"
+metafile = true
+
+[[files]]
+file = "mods/create.pw.toml"
+hash = "4b0ca63279620ec9ba4c63820a9d4f9ceea9b717227137ea19e5c420c820f858"
+metafile = true
+
+[[files]]
+file = "mods/ferrite-core.pw.toml"
+hash = "73360e397134d238ee8fd21d33fd7f9275e9441f74f8f1b6ed92278877c0b9f1"
+metafile = true
+
+[[files]]
+file = "mods/in-control.pw.toml"
+hash = "8e90c889394fe3e69d75a8aa8466b74af5ff8a26b755abf90b668dcc225b23d5"
+metafile = true
+
+[[files]]
+file = "mods/jade.pw.toml"
+hash = "b6e0a61fea06f8d6d8e1672cf07b682625c4b74efd548d5093cd9c1fed167eec"
+metafile = true
+
+[[files]]
+file = "mods/jei.pw.toml"
+hash = "a7285c7ec7f040a49b7fadd65c04b1360a9d93ed1e19a21bf0f36ca1cd6298a8"
+metafile = true
+
+[[files]]
+file = "mods/kubejs-create.pw.toml"
+hash = "21a5deb5da882d9f3eb4eaf7f0cf77f52737e1e6b44d2f691bf10fda9c86d790"
+metafile = true
+
+[[files]]
+file = "mods/kubejs.pw.toml"
+hash = "018fd970193f808f8c28f873d8b8c69ac9ba134712c7db27fc8d639cb226c9a6"
+metafile = true
+
+[[files]]
+file = "mods/lootr.pw.toml"
+hash = "a0a2036a901c1d61589768d62bc92d0cd630a40e9dfe92f45aefdc835c0c808d"
+metafile = true
+
+[[files]]
+file = "mods/rhino.pw.toml"
+hash = "985a99f7465b68e43b98f3dbe1081b7113d957c7926a8caab163503528910f42"
+metafile = true
+
+[[files]]
+file = "mods/sable-pathfinder.pw.toml"
+hash = "bb53384b726692f7c4227355fa0653cbb6aba5bd0bd3ea7c586d395aa4d2d135"
+metafile = true
+
+[[files]]
+file = "mods/sable.pw.toml"
+hash = "674aaf0dc67f808f0054cfc7bbe041d6725fcbbe97644a85ffbd946a22d35666"
+metafile = true
+
+[[files]]
+file = "mods/spark.pw.toml"
+hash = "593fa7b30ab016aa45be07bd6bef3a9f160ed0f24689850d60bf84995d69b843"
+metafile = true
+
+[[files]]
+file = "mods/tacz-1-21-1.pw.toml"
+hash = "a4df36df278da10e6213f40013a07fbc1c1a03631a7c854d5ec26ef49bdb8774"
+metafile = true
+
+[[files]]
+file = "mods/tacz-aeronautics-compat.pw.toml"
+hash = "56f8281643a4471c6e6bd5bd8d5b8b6d2984f8569f44344ce8a2bf00c97461f9"
+metafile = true
+
+[[files]]
+file = "mods/the-hordes.pw.toml"
+hash = "a5d9d5bcbdc15c48252147a795343113e092278437684e24c0c81a3567c760f4"
+metafile = true
+
+[[files]]
+file = "mods/the-lost-cities.pw.toml"
+hash = "d953222a1cf46eb511f5f011b04cccc1decb51c488d797793309fda5bd2ba151"
+metafile = true
+
+[[files]]
+file = "mods/tongda-railway.pw.toml"
+hash = "068f790cd9db5965866d57db6205553d71d727cb28985cdf5d721c7fcf543a1d"
+metafile = true
+
+[[files]]
+file = "mods/zombie-awareness.pw.toml"
+hash = "b7c5a27a51a0b305bce12af6d196164f84b3d9f82d7d5590d30aa160d46fe06a"
+metafile = true

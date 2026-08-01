@@ -1,0 +1,39 @@
+["Horde Event"]
+enableHordeEvent = true
+hordesCommandOnly = false
+spawnAmount = 12
+hordeSpawnMultiplier = 1.1
+hordeSpawnMax = 60
+hordeSpawnDuration = 6000
+hordeSpawnInterval = 1000
+hordeStartTime = 18000
+hordeSpawnDays = 10
+hordeSpawnVariation = 1
+dayLength = 24000
+hordePathingInterval = 40
+hordeEntitySpeed = 1.0
+spawnFirstDay = false
+canSleepDuringHorde = false
+hordePreventsOtherPlayersSleeping = true
+hordeMultiplayerScaling = 0.8
+pauseEventServer = true
+hordeEventByPlayerTime = false
+hordeStartBuffer = 1200
+hordeSpawnChecks = 25
+hordeSpawnDistance = 75.0
+
+["Zombie Players"]
+zombieGraves = false
+drownedPlayers = true
+huskPlayers = true
+zombiePlayersFireImmune = false
+zombiePlayersBurn = false
+zombiePlayersOnlyHurtByPlayers = false
+zombiePlayersStoreItems = true
+zombiePlayersDespawnPeaceful = false
+
+["Infection"]
+enableMobInfection = false
+infectPlayers = false
+playerInfectionResistance = 0.25
+ticksForEffectStage = 6000

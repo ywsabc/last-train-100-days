@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for lasttrain_fake_arg in "$@"; do
+  if [[ "$lasttrain_fake_arg" == "--check" ]]; then
+    while IFS= read -r lasttrain_fake_line; do
+      if [[ -n "${LASTTRAIN_TEST_FAIL_SHA_PATTERN:-}" ]] &&
+        [[ "$lasttrain_fake_line" == *"$LASTTRAIN_TEST_FAIL_SHA_PATTERN"* ]]; then
+        exit 1
+      fi
+    done
+    exit 0
+  fi
+done
+
+exec "${LASTTRAIN_TEST_REAL_SHA256SUM:?}" "$@"

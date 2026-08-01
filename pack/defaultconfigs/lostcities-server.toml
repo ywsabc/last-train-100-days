@@ -1,0 +1,14 @@
+# Applied only when a new world is created.
+# Rare cities leave travel space between urban loot zones and reduce the
+# world-generation cost around an indefinitely extending railway.
+[profiles]
+selectedProfile = "lasttrain"
+selectedCustomJson = ""
+forceSaplingGrowth = false
+todoQueueSize = 40
+cacheCleanupSeconds = 300
+avoidStructures = []
+avoidStructuresAdjacent = false
+avoidVillagesAdjacent = false
+avoidVillages = true
+avoidFlattening = true

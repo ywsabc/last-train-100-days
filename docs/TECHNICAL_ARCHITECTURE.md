@@ -433,11 +433,15 @@ interface VehicleBackend {
 
 ### 9.2 后端选择
 
-建议准备三档：
+本项目的默认且唯一玩法后端已确定为
+[Create Simurail](https://github.com/Crystaelix/Create-Simurail)：
 
-1. `CreateTrainBackend`：稳定开发后端，用于尽早完成初始化、路线、任务、联机和存档测试。
-2. `LoconauticsBackend`：仅在存在正式、可再分发、服务端稳定的 1.21.1 构建及公开集成面后启用。
-3. `SimuRailBackend` 或其他航空学/Simulated 铁路后端：与 Loconautics 同样作为可替换插件，不以社区名称推断实际 mod id 或 API。
+1. 固定上游提交 `e68481d`，mod id 为 `simurail`；
+2. 依赖 Create、Create Aeronautics 提供的 Simulated、Sable，并使用
+   `simurail:physics_bogey` 与 `simulated:physics_assembler`；
+3. 核心只通过注册表 ID 和一个 Alpha 适配器调用，不把测试版实现类型写入存档；
+4. 普通 Create 列车只允许用于诊断或救援，不作为玩家可选择的正式玩法后端；
+5. Loconautics 与 Ferronautics 不进入本整合包依赖图。
 
 后端在创建战役时选定并写入存档。服务器启动时发现原后端缺失：
 
@@ -448,20 +452,22 @@ interface VehicleBackend {
 
 ### 9.3 不稳定发布风险
 
-截至本方案编写时，Loconautics 的公开项目页仍明确标为 “NOT YET RELEASED”。Create: Simulated/Sable 生态虽有公开源码和周边构建，但具体铁路实现、服务器稳定性、存档兼容承诺和发布坐标必须在锁版时重新确认。“SimuRail”名称也不能在没有确切项目链接、mod id、许可证和服务端测试结果时成为硬依赖。
+Create Simurail 尚未正式发布，因此本项目把它作为明确标注的技术预览依赖。
+当前构建同时固定 Git 提交、GitHub Actions artifact ID、压缩包 SHA-256 与运行
+JAR SHA-256；没有匹配校验值就拒绝安装。
 
 因此：
 
-- MVP 的核心任务与路线开发不得等待上述后端。
-- 测试版可以用 Create 原生列车作为兼容载具，但发行说明必须明确它不是最终物理体验。
+- MVP 的核心任务与路线开发不得等待 Simurail API 稳定。
+- 开发版从第一天就验证 Simurail 物理车，不把普通 Create 列车伪装成最终体验。
 - 正式物理版的最低验收包括：专服可启动、玩家站在移动列车上不频繁掉落、跨区块稳定、服务器重启后恢复、脱节/脱轨可救援、容器不复制、6 人延迟可接受、许可证允许整合包分发。
-- 不把测试群私有 jar、Discord 临时构建或无固定校验值的下载作为公开整合包依赖。
+- 不把测试群私有 jar、Discord 临时构建或无固定校验值的下载作为依赖。
 - 所有物理专属玩法通过能力标志启用；无该能力时提供功能等价但表现简化的任务。
 
 相关公开页面：
 
 - [TongDa Railway](https://www.curseforge.com/minecraft/mc-mods/tongda-railway)
-- [Loconautics](https://www.curseforge.com/minecraft/mc-mods/loconautics)
+- [Create Simurail 源码项目](https://github.com/Crystaelix/Create-Simurail)
 - [Create: Simulated 源码项目](https://github.com/Creators-of-Aeronautics/Simulated-Project)
 
 ## 10. 任务系统与状态机
@@ -876,8 +882,8 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 
 | 风险 | 影响 | 对策 / 决策闸门 |
 | --- | --- | --- |
-| Loconautics 仍未正式发布 | 无法作为可分发硬依赖，API/存档可能突变 | 核心先用 Create 后端；正式构建、许可证和专服验收通过后再启用 |
-| “SimuRail”等候选项目身份/API 不明确 | 可能集成错项目或依赖私有构建 | 锁版前要求确切链接、mod id、版本、校验值和公开 API |
+| Create Simurail 尚未正式发布 | API/存档可能突变，CI artifact 可能过期 | 固定提交和双重哈希；适配器隔离；缓存或从固定源码构建；每次升级跑专服验收 |
+| Simurail 物理结构组装失败 | 玩家没有默认载具 | 保存独立装配状态和失败次数；保留站台现场；提供管理员诊断与后续救援命令 |
 | TongDa 生成器不提供剧情级控制 API | 无法保证单一连续主线或指定任务点 | TongDa 被动提供环境/支线；核心自有受控主线 RouteBackend |
 | TongDa 高度图预计算与城市生成过重 | 区段生成卡顿、列车追上生成窗口 | 分 tick 预算、提前 2–3 段生成、速度屏障、可选服务端预生成 |
 | Create 内部轨道图 API 变化 | 升级后验证和列车绑定失效 | 版本锁定、集成包隔离、固定地图 GameTest、升级闸门 |

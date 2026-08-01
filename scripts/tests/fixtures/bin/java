@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-XshowSettings:properties" ]]; then
+  echo "    java.specification.version = ${LASTTRAIN_TEST_JAVA_FEATURE:-21}" >&2
+  exit 0
+fi
+
+lasttrain_fake_game=""
+lasttrain_fake_side=""
+lasttrain_fake_previous=""
+for lasttrain_fake_arg in "$@"; do
+  case "$lasttrain_fake_previous" in
+    --pack-folder)
+      lasttrain_fake_game="$lasttrain_fake_arg"
+      ;;
+    -s)
+      lasttrain_fake_side="$lasttrain_fake_arg"
+      ;;
+  esac
+  lasttrain_fake_previous="$lasttrain_fake_arg"
+done
+
+[[ "$lasttrain_fake_side" == "client" ]] || {
+  echo "fake java expected Packwiz side client" >&2
+  exit 1
+}
+[[ -n "$lasttrain_fake_game" ]] || {
+  echo "fake java did not receive --pack-folder" >&2
+  exit 1
+}
+
+mkdir -p "$lasttrain_fake_game/mods"
+printf 'packwiz client fixture\n' > "$lasttrain_fake_game/mods/from-packwiz-client.jar"
+printf '%s\n' "$*" >> "${LASTTRAIN_TEST_LOG:?}"

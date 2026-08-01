@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$*" == "clean build" ]] || {
+  echo "fake Gradle expected: clean build" >&2
+  exit 1
+}
+mkdir -p build/libs
+printf 'lasttrain core fixture\n' > build/libs/lasttrain-test.jar

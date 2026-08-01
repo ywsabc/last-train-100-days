@@ -1,0 +1,15 @@
+# Protect the Sable train sublevel and generated stations from irreversible
+# explosive-ammunition damage while retaining combat knockback.
+[ammo]
+ExplosiveAmmoDestroysBlock = false
+IgniteBlock = false
+DestroyGlass = false
+ExplosiveAmmoKnockBack = true
+GlobalBulletSpeedModifier = 2.0
+
+[gun]
+DefaultGunFireSoundDistance = 64
+
+[other]
+ServerHitboxLatencyFix = true
+ServerHitboxLatencyMaxSaveMs = 1000
