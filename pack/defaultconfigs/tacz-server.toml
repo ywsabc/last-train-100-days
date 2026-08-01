@@ -1,0 +1,7 @@
+# Copied into serverconfig for each new single-player or dedicated world.
+[misc]
+ServerShootNetworkCheck = true
+ServerShootCooldownCheck = true
+
+[base_multiplier]
+DamageBaseMultiplier = 0.85

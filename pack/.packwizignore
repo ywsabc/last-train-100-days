@@ -1,0 +1,6 @@
+# Development documentation is kept beside the pack but is not installed into
+# a Minecraft instance or included in Packwiz's byte hash graph.
+/README.md
+/kubejs/README.md
+/.packwizignore
+/*.mrpack

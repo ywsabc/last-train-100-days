@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'gh|%s\n' "$*" >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+
+if [[ "${1:-}" == "auth" && "${2:-}" == "status" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "api" ]]; then
+  case "${LASTTRAIN_SIMURAIL_GH_MODE:-fail}" in
+    fail)
+      exit 1
+      ;;
+    *)
+      echo "unsupported fake gh mode: ${LASTTRAIN_SIMURAIL_GH_MODE}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+echo "unexpected fake gh invocation: $*" >&2
+exit 2

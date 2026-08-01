@@ -1,0 +1,56 @@
+name: Build
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07 # v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+
+      - name: Verify installer safety tests
+        run: |
+          ./scripts/tests/fetch-simurail-test.sh
+          ./scripts/tests/install-dev-client-test.sh
+          ./scripts/tests/install-dev-server-test.sh
+
+      - name: Build with Gradle
+        run: ./gradlew build
+
+      - name: Setup Go for Packwiz validation
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.24.6'
+
+      - name: Install pinned Packwiz
+        run: go install github.com/packwiz/packwiz@dfd8b68a4796c763e25bad50265ea1f1233e24f1
+
+      - name: Verify Packwiz index is current
+        run: |
+          cd pack
+          packwiz refresh
+          git diff --exit-code -- index.toml pack.toml
+
+      - name: Upload campaign core
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lasttrain-core
+          path: build/libs/lasttrain-*.jar
+          if-no-files-found: error

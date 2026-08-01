@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+simurail_fake_output=""
+simurail_fake_previous=""
+for simurail_fake_arg in "$@"; do
+  if [[ "$simurail_fake_previous" == "-o" ]]; then
+    simurail_fake_output="$simurail_fake_arg"
+  fi
+  simurail_fake_previous="$simurail_fake_arg"
+done
+
+[[ -n "$simurail_fake_output" ]] || {
+  echo "fake curl did not receive -o" >&2
+  exit 2
+}
+
+printf 'curl|%s\n' "$*" >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+printf 'pinned Simurail source fixture\n' > "$simurail_fake_output"

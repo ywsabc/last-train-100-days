@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+simurail_fake_destination=""
+simurail_fake_previous=""
+for simurail_fake_arg in "$@"; do
+  if [[ "$simurail_fake_previous" == "-C" ]]; then
+    simurail_fake_destination="$simurail_fake_arg"
+  fi
+  simurail_fake_previous="$simurail_fake_arg"
+done
+
+[[ -n "$simurail_fake_destination" ]] || {
+  echo "fake tar did not receive -C" >&2
+  exit 2
+}
+
+printf 'tar|%s\n' "$*" >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+mkdir -p "$simurail_fake_destination/gradle/wrapper"
+case "${LASTTRAIN_SIMURAIL_WRAPPER_URL_MODE:-services}" in
+  services)
+    simurail_fake_distribution_url='https\://services.gradle.org/distributions/gradle-8.14.3-bin.zip'
+    ;;
+  downloads)
+    simurail_fake_distribution_url='https\://downloads.gradle.org/distributions/gradle-8.14.3-bin.zip'
+    ;;
+  wrong)
+    simurail_fake_distribution_url='https\://example.invalid/distributions/gradle-8.14.3-bin.zip'
+    ;;
+  *)
+    echo "unsupported wrapper URL mode" >&2
+    exit 2
+    ;;
+esac
+printf 'distributionUrl=%s\n' "$simurail_fake_distribution_url" \
+  > "$simurail_fake_destination/gradle/wrapper/gradle-wrapper.properties"
+
+case "${LASTTRAIN_SIMURAIL_WRAPPER_HASH_MODE:-missing}" in
+  missing)
+    ;;
+  correct)
+    printf '%s\n' \
+      'distributionSha256Sum=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531' \
+      >> "$simurail_fake_destination/gradle/wrapper/gradle-wrapper.properties"
+    ;;
+  wrong)
+    printf '%s\n' \
+      'distributionSha256Sum=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
+      >> "$simurail_fake_destination/gradle/wrapper/gradle-wrapper.properties"
+    ;;
+  *)
+    echo "unsupported wrapper hash mode" >&2
+    exit 2
+    ;;
+esac
+
+cp -- \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/source-gradlew" \
+  "$simurail_fake_destination/gradlew"
