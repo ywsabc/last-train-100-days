@@ -31,12 +31,15 @@
 | Blocks & Bogies | 80+ 转向架样式、选择界面、Create 6.0.8+、1.21.1 NeoForge、与 SnR 菜单互通 | Modrinth/CurseForge/mcmod 21205；SnR 移植版更新说明 | ✅ 确认 |
 | Extended-Bogeys | 旧版可选配置速度/加速度/转弯半径（默认关闭） | GitHub Rabbitminers/Extended-Bogeys | ✅ 确认（已过时） |
 | Create Aeronautics | 1.3.0 已发布 1.21.1 NeoForge | CurseForge 文件页（2026-06-13）；Modrinth | ✅ 确认 |
+| Create Aeronautics | **提供铁路/燃料机制** | Modrinth/mcmod 官方页仅描述"模拟/航空/越野"三板块，无铁路与燃料记载 | ❌ 未证实（作者提供信息，待实测） |
+| Create Train Physics Reloaded | Create 列车燃料（require fuel）、滚动阻力、质量、牵引力、弯道限速 | Mado Hosting 模组页面描述 | ✅ 页面确认（待实测评估） |
 | Loconautics | 尚未正式发布 | 检索未见正式发布记录 | ⚠️ 维持原判断，待复核 |
 | Create Simurail / Ferronautics | 实验/过渡状态 | 原 COMPATIBILITY.md 记录 | ⚠️ 待复核 |
 
 ## 文档更正记录（2026-08-01）
 
-1. 删除"汽鸣铁道提供蒸汽机车/锅炉/燃料压力"断言，改为待自研或另选模组；
+1. 删除"汽鸣铁道提供蒸汽机车/锅炉/燃料压力"断言；燃料来源按作者经验在
+   物理化列车（航空学铁路生态）一侧，公开文档未见记载，待实测；
 2. 更正"Create 无转辙器"：原生 Create 确无，但汽鸣铁道提供转辙器设备；
 3. 补充连挂器配方细节（1 铁板 + 1 红石粉 + 1 列车机壳）；
 4. CONTENT_SUPPLEMENT §6.6 由"属性升级/工时"改写为"物理改造"模型；
@@ -46,6 +49,9 @@
 ## 待实测清单
 
 - 连挂器在 Aeronautics/Sable 物理列车上的连接/断开；
+- 物理化列车（航空学铁路生态）的燃料消耗机制确认；
+- Create Train Physics Reloaded 的 require fuel 选项与本项目物理后端的
+  兼容性评估；
 - 独立车厢（无驾驶台）能否作为"列车"参与连挂；
 - 汽鸣铁道转辙器与信号机在自动站场中的联动；
 - Create 原生列车是否零燃料消耗（自研燃料机制前需先确认）；
