@@ -25,8 +25,11 @@ import net.neoforged.fml.ModList;
  */
 public final class RouteDirector {
     private static final int UPDATE_ALL = 3;
+    private static final int UPDATE_CLEARING = 2 | 16 | 32;
     private static final int TICK_INTERVAL = 20;
     private static final int SEGMENTS_AHEAD = 2;
+    private static final int VEHICLE_CLEARANCE_RADIUS = 3;
+    private static final int VEHICLE_CLEARANCE_HEIGHT = 6;
     private static boolean missingCreateTrackLogged;
 
     private RouteDirector() {
@@ -122,9 +125,10 @@ public final class RouteDirector {
             return false;
         }
 
-        BlockState track = trackBlock.defaultBlockState();
+        BlockState track = RouteTrackStates.eastbound(trackBlock);
         for (int offset = startOffset; offset <= endOffset; offset++) {
             BlockPos deckCenter = station.offset(offset, 0, 0);
+            clearVehicleEnvelope(level, deckCenter);
             for (int z = -1; z <= 1; z++) {
                 level.setBlock(
                         deckCenter.offset(0, 0, z),
@@ -143,6 +147,17 @@ public final class RouteDirector {
             buildWaypointPlatform(level, station, endOffset - 18, endOffset);
         }
         return true;
+    }
+
+    private static void clearVehicleEnvelope(ServerLevel level, BlockPos deckCenter) {
+        for (int y = 1; y <= VEHICLE_CLEARANCE_HEIGHT; y++) {
+            for (int z = -VEHICLE_CLEARANCE_RADIUS; z <= VEHICLE_CLEARANCE_RADIUS; z++) {
+                BlockPos pos = deckCenter.offset(0, y, z);
+                if (!level.getBlockState(pos).isAir()) {
+                    level.setBlock(pos, Blocks.AIR.defaultBlockState(), UPDATE_CLEARING);
+                }
+            }
+        }
     }
 
     private static void placeSupport(ServerLevel level, BlockPos top) {

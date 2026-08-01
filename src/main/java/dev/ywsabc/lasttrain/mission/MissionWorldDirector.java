@@ -4,6 +4,7 @@ import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
+import dev.ywsabc.lasttrain.route.RouteTrackStates;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
@@ -273,7 +274,8 @@ public final class MissionWorldDirector {
         Block track = registeredBlock("create:track");
         int repaired = 0;
         for (int offset = -1; offset <= 1; offset++) {
-            if (level.getBlockState(mission.site().offset(offset, 0, 0)).is(track)) {
+            BlockState state = level.getBlockState(mission.site().offset(offset, 0, 0));
+            if (state.is(track) && propertyIs(state, "shape", "xo")) {
                 repaired++;
             }
         }
@@ -331,10 +333,13 @@ public final class MissionWorldDirector {
         switch (mission.type()) {
             case RAIL_BREAK -> {
                 Block track = registeredBlock("create:track");
+                if (track == Blocks.AIR) {
+                    return;
+                }
                 for (int offset = -1; offset <= 1; offset++) {
                     level.setBlock(
                             mission.site().offset(offset, 0, 0),
-                            track.defaultBlockState(),
+                            RouteTrackStates.eastbound(track),
                             UPDATE_ALL);
                     level.setBlock(
                             mission.site().offset(offset, -1, 0),
@@ -388,7 +393,7 @@ public final class MissionWorldDirector {
         }
         Block track = registeredBlock("create:track");
         if (track != Blocks.AIR) {
-            level.setBlock(site, track.defaultBlockState(), UPDATE_ALL);
+            level.setBlock(site, RouteTrackStates.eastbound(track), UPDATE_ALL);
             level.setBlock(
                     site.below(),
                     Blocks.POLISHED_ANDESITE.defaultBlockState(),
