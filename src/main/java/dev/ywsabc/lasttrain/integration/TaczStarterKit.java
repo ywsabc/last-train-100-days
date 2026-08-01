@@ -3,12 +3,11 @@ package dev.ywsabc.lasttrain.integration;
 import dev.ywsabc.lasttrain.LastTrain;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
-import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.neoforged.fml.ModList;
 
 /**
@@ -16,10 +15,6 @@ import net.neoforged.fml.ModList;
  * dependency of the campaign save module.
  */
 public final class TaczStarterKit {
-    private static final ResourceLocation GUN_ITEM =
-            ResourceLocation.parse("tacz:modern_kinetic_gun");
-    private static final ResourceLocation AMMO_ITEM =
-            ResourceLocation.parse("tacz:ammo");
     private static final ResourceLocation STARTER_GUN =
             ResourceLocation.parse("tacz:glock_17");
     private static final ResourceLocation STARTER_AMMO =
@@ -29,39 +24,40 @@ public final class TaczStarterKit {
     private TaczStarterKit() {
     }
 
-    public static List<ItemStack> create() {
+    public static List<ItemStack> create(HolderLookup.Provider registries) {
+        Objects.requireNonNull(registries, "registries");
         if (!ModList.get().isLoaded("tacz")) {
             return List.of();
         }
 
         try {
-            Item gunItem = registeredItem(GUN_ITEM);
-            Item ammoItem = registeredItem(AMMO_ITEM);
-            if (gunItem == Items.AIR || ammoItem == Items.AIR) {
-                throw new IllegalStateException("TaCZ starter item registrations are missing");
-            }
+            Class<?> fireModeType = Class.forName("com.tacz.guns.api.item.gun.FireMode");
+            @SuppressWarnings({"rawtypes", "unchecked"})
+            Object semiAutomatic = Enum.valueOf((Class<? extends Enum>) fireModeType, "SEMI");
 
-            ItemStack gun = new ItemStack(gunItem);
-            Class<?> gunApi = Class.forName("com.tacz.guns.api.item.IGun");
-            Method getGun = gunApi.getMethod("getIGunOrNull", ItemStack.class);
-            Object gunAccess = getGun.invoke(null, gun);
-            if (gunAccess == null) {
-                throw new IllegalStateException("TaCZ rejected its registered gun item");
-            }
-            gunApi.getMethod("setGunId", ItemStack.class, ResourceLocation.class)
-                    .invoke(gunAccess, gun, STARTER_GUN);
-            gunApi.getMethod("setCurrentAmmoCount", ItemStack.class, int.class)
-                    .invoke(gunAccess, gun, 17);
+            Class<?> gunBuilderType = Class.forName("com.tacz.guns.api.item.builder.GunItemBuilder");
+            Object gunBuilder = gunBuilderType.getMethod("create").invoke(null);
+            gunBuilderType.getMethod("setCount", int.class).invoke(gunBuilder, 1);
+            gunBuilderType.getMethod("setId", ResourceLocation.class).invoke(gunBuilder, STARTER_GUN);
+            gunBuilderType.getMethod("setAmmoCount", int.class).invoke(gunBuilder, 17);
+            gunBuilderType.getMethod("setFireMode", fireModeType).invoke(gunBuilder, semiAutomatic);
+            gunBuilderType.getMethod("setAmmoInBarrel", boolean.class).invoke(gunBuilder, true);
+            Object builtGun = gunBuilderType
+                    .getMethod("build", HolderLookup.Provider.class)
+                    .invoke(gunBuilder, registries);
 
-            ItemStack ammo = new ItemStack(ammoItem, 48);
-            Class<?> ammoApi = Class.forName("com.tacz.guns.api.item.IAmmo");
-            Method getAmmo = ammoApi.getMethod("getIAmmoOrNull", ItemStack.class);
-            Object ammoAccess = getAmmo.invoke(null, ammo);
-            if (ammoAccess == null) {
-                throw new IllegalStateException("TaCZ rejected its registered ammunition item");
+            Class<?> ammoBuilderType = Class.forName("com.tacz.guns.api.item.builder.AmmoItemBuilder");
+            Object ammoBuilder = ammoBuilderType.getMethod("create").invoke(null);
+            ammoBuilderType.getMethod("setCount", int.class).invoke(ammoBuilder, 48);
+            ammoBuilderType.getMethod("setId", ResourceLocation.class).invoke(ammoBuilder, STARTER_AMMO);
+            Object builtAmmo = ammoBuilderType.getMethod("build").invoke(ammoBuilder);
+
+            if (!(builtGun instanceof ItemStack gun)
+                    || !(builtAmmo instanceof ItemStack ammo)
+                    || gun.isEmpty()
+                    || ammo.isEmpty()) {
+                throw new IllegalStateException("TaCZ rejected the configured Glock 17 starter kit");
             }
-            ammoApi.getMethod("setAmmoId", ItemStack.class, ResourceLocation.class)
-                    .invoke(ammoAccess, ammo, STARTER_AMMO);
 
             return List.of(gun, ammo);
         } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
@@ -73,11 +69,5 @@ public final class TaczStarterKit {
             }
             return List.of();
         }
-    }
-
-    private static Item registeredItem(ResourceLocation id) {
-        return BuiltInRegistries.ITEM.containsKey(id)
-                ? BuiltInRegistries.ITEM.get(id)
-                : Items.AIR;
     }
 }

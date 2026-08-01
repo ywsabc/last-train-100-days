@@ -75,6 +75,13 @@ public final class MissionWorldDirector {
             mission = data.activeMission();
         }
 
+        if (mission.stage() == MissionStage.READY_TO_TURN_IN) {
+            // SavedData and chunk saves are not one atomic transaction. Repair
+            // the passable route idempotently after a restart even when the
+            // READY state reached disk before the barrier removal did.
+            resolveRouteBarrier(server.overworld(), mission);
+            return;
+        }
         if (mission.stage() != MissionStage.ACTIVE) {
             return;
         }
@@ -326,15 +333,18 @@ public final class MissionWorldDirector {
         return mission.target() - remaining.size();
     }
 
-    public static void clearMissionWorld(ServerLevel level, ActiveMission mission) {
-        if (mission == null || mission.site() == null || !level.hasChunkAt(mission.site())) {
-            return;
+    public static boolean clearMissionWorld(ServerLevel level, ActiveMission mission) {
+        if (mission == null || mission.site() == null) {
+            return true;
+        }
+        if (!level.hasChunkAt(mission.site())) {
+            return false;
         }
         switch (mission.type()) {
             case RAIL_BREAK -> {
                 Block track = registeredBlock("create:track");
                 if (track == Blocks.AIR) {
-                    return;
+                    return false;
                 }
                 for (int offset = -1; offset <= 1; offset++) {
                     level.setBlock(
@@ -361,6 +371,7 @@ public final class MissionWorldDirector {
                 // Recovered supply barrels remain as ordinary station loot.
             }
         }
+        return true;
     }
 
     private static void prepareRouteBarrier(ServerLevel level, BlockPos site) {

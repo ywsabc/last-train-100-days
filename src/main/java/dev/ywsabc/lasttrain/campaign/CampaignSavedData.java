@@ -25,7 +25,7 @@ import net.minecraft.world.level.saveddata.SavedData;
  * servers.</p>
  */
 public final class CampaignSavedData extends SavedData {
-    public static final int CURRENT_SCHEMA = 3;
+    public static final int CURRENT_SCHEMA = 4;
     public static final int FINAL_DAY = 100;
     public static final int DEFAULT_ACTIVE_TICKS_PER_DAY = 24_000;
     public static final int MAX_ROUTE_SEGMENT = 400_000;
@@ -51,6 +51,7 @@ public final class CampaignSavedData extends SavedData {
     private boolean starterTrainAssembled;
     private int starterTrainAssemblyAttempts;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
+    private final Set<UUID> starterGunRecipients = new HashSet<>();
 
     public CampaignSavedData() {
     }
@@ -85,14 +86,8 @@ public final class CampaignSavedData extends SavedData {
         data.starterTrainPlaced = tag.getBoolean("starter_train_placed");
         data.starterTrainAssembled = tag.getBoolean("starter_train_assembled");
         data.starterTrainAssemblyAttempts = Math.max(0, tag.getInt("starter_train_assembly_attempts"));
-        ListTag recipients = tag.getList("starter_kit_recipients", Tag.TAG_STRING);
-        for (int index = 0; index < recipients.size(); index++) {
-            try {
-                data.starterKitRecipients.add(UUID.fromString(recipients.getString(index)));
-            } catch (IllegalArgumentException ignored) {
-                // Ignore malformed entries rather than making an existing world unloadable.
-            }
-        }
+        loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
+        loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         return data;
     }
 
@@ -117,14 +112,30 @@ public final class CampaignSavedData extends SavedData {
         tag.putBoolean("starter_train_placed", starterTrainPlaced);
         tag.putBoolean("starter_train_assembled", starterTrainAssembled);
         tag.putInt("starter_train_assembly_attempts", starterTrainAssemblyAttempts);
-        ListTag recipients = new ListTag();
-        starterKitRecipients.stream()
+        tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
+        tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
+        return tag;
+    }
+
+    private static void loadUuidSet(CompoundTag tag, String key, Set<UUID> target) {
+        ListTag entries = tag.getList(key, Tag.TAG_STRING);
+        for (int index = 0; index < entries.size(); index++) {
+            try {
+                target.add(UUID.fromString(entries.getString(index)));
+            } catch (IllegalArgumentException ignored) {
+                // Ignore malformed entries rather than making an existing world unloadable.
+            }
+        }
+    }
+
+    private static ListTag saveUuidSet(Set<UUID> values) {
+        ListTag entries = new ListTag();
+        values.stream()
                 .map(UUID::toString)
                 .sorted()
                 .map(StringTag::valueOf)
-                .forEach(recipients::add);
-        tag.put("starter_kit_recipients", recipients);
-        return tag;
+                .forEach(entries::add);
+        return entries;
     }
 
     public void initialize(long worldSeed) {
@@ -291,6 +302,18 @@ public final class CampaignSavedData extends SavedData {
 
     public boolean claimStarterKit(UUID playerId) {
         if (!starterKitRecipients.add(playerId)) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    public boolean hasClaimedStarterGun(UUID playerId) {
+        return starterGunRecipients.contains(playerId);
+    }
+
+    public boolean claimStarterGun(UUID playerId) {
+        if (!starterGunRecipients.add(playerId)) {
             return false;
         }
         setDirty();

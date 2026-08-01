@@ -6,6 +6,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.server.IntegrationBridge;
@@ -156,6 +157,17 @@ public final class LastTrainCommands {
 
     private static int turnInMission(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        ActiveMission mission = data.activeMission();
+        if (mission == null || mission.stage() != MissionStage.READY_TO_TURN_IN) {
+            context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.not_ready"));
+            return 0;
+        }
+        if (!MissionWorldDirector.clearMissionWorld(
+                context.getSource().getServer().overworld(),
+                mission)) {
+            context.getSource().sendFailure(missionSiteUnavailable(mission));
+            return 0;
+        }
         if (!data.turnInMission()) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.not_ready"));
             return 0;
@@ -163,6 +175,7 @@ public final class LastTrainCommands {
         context.getSource().sendSuccess(
                 () -> Component.translatable("command.lasttrain.mission.completed"),
                 true);
+        IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
         return 1;
     }
 
@@ -173,9 +186,12 @@ public final class LastTrainCommands {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.none"));
             return 0;
         }
-        MissionWorldDirector.clearMissionWorld(
+        if (!MissionWorldDirector.clearMissionWorld(
                 context.getSource().getServer().overworld(),
-                mission);
+                mission)) {
+            context.getSource().sendFailure(missionSiteUnavailable(mission));
+            return 0;
+        }
         data.clearMission();
         context.getSource().sendSuccess(
                 () -> Component.translatable("command.lasttrain.mission.cleared"),
@@ -195,5 +211,17 @@ public final class LastTrainCommands {
                 mission.target(),
                 mission.routeSegment(),
                 mission.stage().name());
+    }
+
+    private static Component missionSiteUnavailable(ActiveMission mission) {
+        if (mission.site() == null) {
+            return Component.translatable(
+                    "command.lasttrain.mission.site_unavailable", "?", "?", "?");
+        }
+        return Component.translatable(
+                "command.lasttrain.mission.site_unavailable",
+                mission.site().getX(),
+                mission.site().getY(),
+                mission.site().getZ());
     }
 }
