@@ -15,7 +15,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       JAVA_TOOL_OPTIONS: -Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m
-      LASTTRAIN_SERVER: ${{ runner.temp }}/lasttrain-server
+      LASTTRAIN_SERVER: /tmp/lasttrain-server
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -36,7 +36,7 @@ jobs:
         run: ./scripts/install-dev-server.sh "$LASTTRAIN_SERVER"
 
       - name: Discover all server mods without accepting the EULA
-        working-directory: ${{ runner.temp }}/lasttrain-server
+        working-directory: /tmp/lasttrain-server
         run: ./run.sh nogui
 
       - name: Verify the legal stop and required mod discovery
@@ -61,5 +61,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: real-server-discovery-smoke-logs
-          path: ${{ runner.temp }}/lasttrain-server/logs
+          path: /tmp/lasttrain-server/logs
           if-no-files-found: warn
