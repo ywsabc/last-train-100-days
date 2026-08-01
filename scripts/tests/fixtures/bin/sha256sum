@@ -8,9 +8,22 @@ for lasttrain_fake_arg in "$@"; do
         [[ "$lasttrain_fake_line" == *"$LASTTRAIN_TEST_FAIL_SHA_PATTERN"* ]]; then
         exit 1
       fi
+      if [[ "${LASTTRAIN_TEST_VALIDATE_CACHE_CONTENT:-0}" == "1" ]]; then
+        lasttrain_fake_file="${lasttrain_fake_line#*  }"
+        if [[ "$lasttrain_fake_file" == "$lasttrain_fake_line" ]] ||
+          [[ ! -f "$lasttrain_fake_file" ]] ||
+          ! grep -qx 'download fixture' "$lasttrain_fake_file"; then
+          exit 1
+        fi
+      fi
     done
     exit 0
   fi
 done
+
+if [[ -n "${LASTTRAIN_TEST_FAIL_SHA_COMMAND_PATTERN:-}" ]] &&
+  [[ "$*" == *"$LASTTRAIN_TEST_FAIL_SHA_COMMAND_PATTERN"* ]]; then
+  exit 1
+fi
 
 exec "${LASTTRAIN_TEST_REAL_SHA256SUM:?}" "$@"

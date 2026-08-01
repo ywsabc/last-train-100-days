@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+simurail_fake_properties="gradle/wrapper/gradle-wrapper.properties"
+simurail_fake_expected_hash="bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531"
+
+[[ "$*" == \
+  "--no-daemon clean assemble -PcommitHash=e68481d" ]] || {
+  echo "fake Simurail Gradle received unexpected arguments: $*" >&2
+  exit 2
+}
+simurail_fake_expected_url='https\://downloads.gradle.org/distributions/gradle-8.14.3-bin.zip'
+grep -Fqx \
+  "distributionUrl=$simurail_fake_expected_url" \
+  "$simurail_fake_properties"
+[[ "$(grep -c '^distributionSha256Sum=' "$simurail_fake_properties")" == "1" ]]
+grep -qx \
+  "distributionSha256Sum=$simurail_fake_expected_hash" \
+  "$simurail_fake_properties"
+
+printf 'gradlew|%s|distributionUrl=%s|distributionSha256Sum=%s\n' \
+  "$*" "$simurail_fake_expected_url" "$simurail_fake_expected_hash" \
+  >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+mkdir -p build/libs
+printf 'simurail e68481d fixture\n' \
+  > build/libs/simurail-1.21.1-0.0.0-a+e68481d.jar

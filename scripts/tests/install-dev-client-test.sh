@@ -135,6 +135,10 @@ fi
 [[ ! -e \
   "$lasttrain_bad_hash/.minecraft/mods/simurail-1.21.1-0.0.0-a+e68481d.jar" ]] ||
   lasttrain_test_fail "failed installation copied an unverified Simurail JAR"
+if find "$lasttrain_bad_hash/.lasttrain-installer-cache" \
+  -maxdepth 1 -type f -name 'lasttrain-*.jar.build.*' -print -quit | grep -q .; then
+  lasttrain_test_fail "failed installation retained a copied core build artifact"
+fi
 
 mkdir -p "$lasttrain_fake_repo/pack/unsafe-client"
 if "$lasttrain_fake_repo/scripts/install-dev-client.sh" \
@@ -142,6 +146,17 @@ if "$lasttrain_fake_repo/scripts/install-dev-client.sh" \
   >"$lasttrain_test_work/pack-source.out" 2>&1; then
   lasttrain_test_fail "installer accepted a target inside Packwiz source"
 fi
+
+exec {lasttrain_test_lock_fd}> "$lasttrain_client/.lasttrain-install.lock"
+flock -n "$lasttrain_test_lock_fd"
+if "$lasttrain_fake_repo/scripts/install-dev-client.sh" "$lasttrain_client" \
+  >"$lasttrain_test_work/lock.out" 2>&1; then
+  lasttrain_test_fail "installer ignored an existing client target lock"
+fi
+grep -q 'already running' "$lasttrain_test_work/lock.out" ||
+  lasttrain_test_fail "concurrent client installer failure did not explain the lock"
+flock -u "$lasttrain_test_lock_fd"
+exec {lasttrain_test_lock_fd}>&-
 
 lasttrain_link_target="$lasttrain_test_work/link-target"
 mkdir -p "$lasttrain_link_target"

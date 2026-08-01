@@ -29,6 +29,7 @@ case "$lasttrain_target/" in
 esac
 
 lasttrain_marker="$lasttrain_target/.lasttrain-managed-client"
+lasttrain_lock="$lasttrain_target/.lasttrain-install.lock"
 lasttrain_marker_value="lasttrain-managed-client-v1"
 lasttrain_new_install="false"
 
@@ -60,7 +61,8 @@ for lasttrain_required_file in \
   fi
 done
 
-for lasttrain_command in java jar curl sha256sum awk find grep sed git date mktemp; do
+for lasttrain_command in \
+  java jar curl sha256sum awk find grep sed git date mktemp flock cp mv rm chmod mkdir basename; do
   if ! command -v "$lasttrain_command" >/dev/null 2>&1; then
     echo "Required command was not found on PATH: $lasttrain_command" >&2
     exit 1
@@ -99,6 +101,7 @@ done
 for lasttrain_managed_file in \
   "$lasttrain_target/instance.cfg" \
   "$lasttrain_target/mmc-pack.json" \
+  "$lasttrain_lock" \
   "$lasttrain_target/.lasttrain-install-state" \
   "$lasttrain_target/.lasttrain-install-in-progress"; do
   if [[ -L "$lasttrain_managed_file" ]] ||
@@ -108,7 +111,33 @@ for lasttrain_managed_file in \
   fi
 done
 
+exec {lasttrain_lock_fd}> "$lasttrain_lock"
+if ! flock -n "$lasttrain_lock_fd"; then
+  echo "Another Last Train client installation is already running for: $lasttrain_target" >&2
+  exit 1
+fi
+
 mkdir -p "$lasttrain_game/mods" "$lasttrain_cache" "$lasttrain_backup_root"
+
+lasttrain_core_source=""
+lasttrain_core_staged=""
+lasttrain_simurail_staged=""
+lasttrain_state_staged=""
+lasttrain_cleanup() {
+  local lasttrain_exit_status=$?
+  trap - EXIT
+  for lasttrain_cleanup_path in \
+    "$lasttrain_core_source" \
+    "$lasttrain_core_staged" \
+    "$lasttrain_simurail_staged" \
+    "$lasttrain_state_staged"; do
+    if [[ -n "$lasttrain_cleanup_path" ]]; then
+      rm -f -- "$lasttrain_cleanup_path"
+    fi
+  done
+  exit "$lasttrain_exit_status"
+}
+trap lasttrain_cleanup EXIT
 
 lasttrain_verify_sha256() {
   local lasttrain_expected="$1"
@@ -200,6 +229,9 @@ java -jar "$lasttrain_packwiz_bootstrap" \
   --pack-folder "$lasttrain_game" \
   "$lasttrain_repo/pack/pack.toml"
 
+mkdir -p -- "$lasttrain_repo/.gradle"
+exec {lasttrain_repo_build_lock_fd}> "$lasttrain_repo/.gradle/lasttrain-installer-build.lock"
+flock "$lasttrain_repo_build_lock_fd"
 (
   cd "$lasttrain_repo"
   ./gradlew clean build
@@ -222,6 +254,13 @@ if [[ "${#lasttrain_core_candidates[@]}" -ne 1 ]]; then
   echo "Expected exactly one runnable Last Train core JAR; found ${#lasttrain_core_candidates[@]}." >&2
   exit 1
 fi
+lasttrain_core_filename="$(basename "${lasttrain_core_candidates[0]}")"
+lasttrain_core_source="$(
+  mktemp "$lasttrain_cache/$lasttrain_core_filename.build.XXXXXXXX"
+)"
+cp -- "${lasttrain_core_candidates[0]}" "$lasttrain_core_source"
+flock -u "$lasttrain_repo_build_lock_fd"
+exec {lasttrain_repo_build_lock_fd}>&-
 
 lasttrain_simurail_filename="simurail-1.21.1-0.0.0-a+e68481d.jar"
 lasttrain_simurail_sha256="d85ee304d972397807f801aae73a167163729628e382b26db0fcc0c52834e602"
@@ -239,12 +278,12 @@ if ! "$lasttrain_repo/scripts/verify-simurail.sh" "$lasttrain_cached_simurail"; 
   exit 1
 fi
 
-lasttrain_core_source="${lasttrain_core_candidates[0]}"
-lasttrain_core_filename="$(basename "$lasttrain_core_source")"
 lasttrain_core_staged="$(
   mktemp "$lasttrain_game/mods/$lasttrain_core_filename.new.XXXXXXXX"
 )"
 cp -- "$lasttrain_core_source" "$lasttrain_core_staged"
+rm -f -- "$lasttrain_core_source"
+lasttrain_core_source=""
 lasttrain_simurail_staged="$(
   mktemp "$lasttrain_game/mods/$lasttrain_simurail_filename.new.XXXXXXXX"
 )"
@@ -254,6 +293,7 @@ if ! "$lasttrain_repo/scripts/verify-simurail.sh" "$lasttrain_simurail_staged"; 
   rm -f -- "$lasttrain_simurail_staged"
   exit 1
 fi
+chmod 0644 -- "$lasttrain_core_staged" "$lasttrain_simurail_staged"
 
 lasttrain_backup="$(mktemp -d "$lasttrain_backup_root/update.XXXXXXXX")"
 for lasttrain_old_mod in \

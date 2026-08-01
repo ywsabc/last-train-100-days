@@ -6,6 +6,20 @@ if [[ "${1:-}" == "-XshowSettings:properties" ]]; then
   exit 0
 fi
 
+for lasttrain_fake_arg in "$@"; do
+  if [[ "$lasttrain_fake_arg" == "--installServer" ]]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > run.sh
+    chmod +x run.sh
+    mkdir -p libraries/net/neoforged/neoforge/21.1.244
+    printf 'NeoForge fixture args\n' \
+      > libraries/net/neoforged/neoforge/21.1.244/unix_args.txt
+    printf 'NeoForge fixture server\n' \
+      > libraries/net/neoforged/neoforge/21.1.244/neoforge-21.1.244-server.jar
+    printf '%s\n' "$*" >> "${LASTTRAIN_TEST_LOG:?}"
+    exit 0
+  fi
+done
+
 lasttrain_fake_game=""
 lasttrain_fake_side=""
 lasttrain_fake_previous=""
@@ -21,8 +35,8 @@ for lasttrain_fake_arg in "$@"; do
   lasttrain_fake_previous="$lasttrain_fake_arg"
 done
 
-[[ "$lasttrain_fake_side" == "client" ]] || {
-  echo "fake java expected Packwiz side client" >&2
+[[ "$lasttrain_fake_side" == "client" || "$lasttrain_fake_side" == "server" ]] || {
+  echo "fake java expected Packwiz side client or server" >&2
   exit 1
 }
 [[ -n "$lasttrain_fake_game" ]] || {
@@ -31,5 +45,27 @@ done
 }
 
 mkdir -p "$lasttrain_fake_game/mods"
-printf 'packwiz client fixture\n' > "$lasttrain_fake_game/mods/from-packwiz-client.jar"
+printf 'packwiz %s fixture\n' "$lasttrain_fake_side" \
+  > "$lasttrain_fake_game/mods/from-packwiz-$lasttrain_fake_side.jar"
+if [[ "$lasttrain_fake_side" == "server" ]]; then
+  for lasttrain_fake_mod in \
+    create-1.21.1-6.0.10.jar \
+    tongdarailway-1.1.3+mc21.1.jar \
+    tacz-neoforge-1.21.1-1.1.8-hotfix-r5.jar \
+    create-aeronautics-bundled-1.21.1-1.3.0.jar \
+    sable-neoforge-1.21.1-2.0.3.jar \
+    sable_pathfinder-1.4.0.jar; do
+    printf 'packwiz required server fixture\n' \
+      > "$lasttrain_fake_game/mods/$lasttrain_fake_mod"
+  done
+fi
+if [[ "${LASTTRAIN_TEST_FAIL_PACKWIZ_AFTER_WRITE:-0}" == "1" ]]; then
+  mkdir -p "$lasttrain_fake_game/config"
+  printf 'mutated by failed Packwiz fixture\n' \
+    > "$lasttrain_fake_game/config/transaction-sentinel.txt"
+  printf 'partial Packwiz fixture\n' \
+    > "$lasttrain_fake_game/mods/partial-packwiz.jar"
+  printf '%s\n' "$*" >> "${LASTTRAIN_TEST_LOG:?}"
+  exit 41
+fi
 printf '%s\n' "$*" >> "${LASTTRAIN_TEST_LOG:?}"
