@@ -172,7 +172,9 @@ public final class TaczGunfireBridge {
                         && !zombie.isAlliedTo(shooter)
                         // Keep Entity#distanceToSqr here: Sable replaces it
                         // with a sub-level-aware physical distance calculation.
-                        && isWithinHearingDistance(zombie.distanceToSqr(shooter), settings));
+                        && GunfireAttractionPolicy.isWithinHearingDistance(
+                                zombie.distanceToSqr(shooter),
+                                settings.horizontalRadius()));
         candidates.sort(Comparator.comparingDouble(zombie -> zombie.distanceToSqr(shooter)));
 
         int attracted = 0;
@@ -189,7 +191,7 @@ public final class TaczGunfireBridge {
                     ? zombie.distanceToSqr(currentTarget)
                     : Double.POSITIVE_INFINITY;
             double shooterDistanceSquared = zombie.distanceToSqr(shooter);
-            if (!shouldRetarget(
+            if (!GunfireAttractionPolicy.shouldRetarget(
                     currentTargetUsable,
                     shooterDistanceSquared,
                     currentTargetDistanceSquared)) {
@@ -205,17 +207,6 @@ public final class TaczGunfireBridge {
             }
         }
         return attracted;
-    }
-
-    static boolean isWithinHearingDistance(double distanceSquared, Settings settings) {
-        return distanceSquared <= settings.horizontalRadius() * settings.horizontalRadius();
-    }
-
-    static boolean shouldRetarget(
-            boolean currentTargetUsable,
-            double shooterDistanceSquared,
-            double currentTargetDistanceSquared) {
-        return !currentTargetUsable || shooterDistanceSquared <= currentTargetDistanceSquared;
     }
 
     /**
