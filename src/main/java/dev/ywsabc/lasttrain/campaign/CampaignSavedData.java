@@ -25,7 +25,7 @@ import net.minecraft.world.level.saveddata.SavedData;
  * servers.</p>
  */
 public final class CampaignSavedData extends SavedData {
-    public static final int CURRENT_SCHEMA = 4;
+    public static final int CURRENT_SCHEMA = 5;
     public static final int FINAL_DAY = 100;
     public static final int DEFAULT_ACTIVE_TICKS_PER_DAY = 24_000;
     public static final int MAX_ROUTE_SEGMENT = 400_000;
@@ -49,6 +49,7 @@ public final class CampaignSavedData extends SavedData {
     private long starterStationAnchor;
     private boolean starterTrainPlaced;
     private boolean starterTrainAssembled;
+    private UUID starterTrainSublevelId;
     private int starterTrainAssemblyAttempts;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
@@ -85,6 +86,14 @@ public final class CampaignSavedData extends SavedData {
         data.starterStationAnchor = tag.getLong("starter_station_anchor");
         data.starterTrainPlaced = tag.getBoolean("starter_train_placed");
         data.starterTrainAssembled = tag.getBoolean("starter_train_assembled");
+        if (tag.contains("starter_train_sublevel_id")) {
+            try {
+                data.starterTrainSublevelId =
+                        UUID.fromString(tag.getString("starter_train_sublevel_id"));
+            } catch (IllegalArgumentException ignored) {
+                data.starterTrainSublevelId = null;
+            }
+        }
         data.starterTrainAssemblyAttempts = Math.max(0, tag.getInt("starter_train_assembly_attempts"));
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
@@ -111,6 +120,9 @@ public final class CampaignSavedData extends SavedData {
         tag.putLong("starter_station_anchor", starterStationAnchor);
         tag.putBoolean("starter_train_placed", starterTrainPlaced);
         tag.putBoolean("starter_train_assembled", starterTrainAssembled);
+        if (starterTrainSublevelId != null) {
+            tag.putString("starter_train_sublevel_id", starterTrainSublevelId.toString());
+        }
         tag.putInt("starter_train_assembly_attempts", starterTrainAssemblyAttempts);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
@@ -337,9 +349,10 @@ public final class CampaignSavedData extends SavedData {
         return starterTrainAssemblyAttempts;
     }
 
-    public void markStarterTrainAssembled() {
+    public void markStarterTrainAssembled(UUID sublevelId) {
         starterTrainPlaced = true;
         starterTrainAssembled = true;
+        starterTrainSublevelId = sublevelId;
         setDirty();
     }
 
@@ -441,6 +454,10 @@ public final class CampaignSavedData extends SavedData {
 
     public boolean starterTrainAssembled() {
         return starterTrainAssembled;
+    }
+
+    public UUID starterTrainSublevelId() {
+        return starterTrainSublevelId;
     }
 
     public int starterTrainAssemblyAttempts() {

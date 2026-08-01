@@ -51,6 +51,21 @@ public final class SimurailTrainBootstrap {
 
     public static void ensureLayout(ServerLevel level, CampaignSavedData data) {
         if (data.starterTrainAssembled()) {
+            if (data.starterTrainSublevelId() == null) {
+                Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
+                        level,
+                        data.campaignId());
+                if (recovered.isPresent()) {
+                    data.markStarterTrainAssembled(recovered.orElseThrow());
+                    LastTrain.LOGGER.info(
+                            "Recovered persisted starter train identity {} from its Sable tag",
+                            recovered.orElseThrow());
+                } else {
+                    LastTrain.LOGGER.error(
+                            "The campaign says the starter train is assembled but has no saved Sable UUID. "
+                                    + "Automatic recovery refuses to claim an unrelated aircraft or vehicle");
+                }
+            }
             return;
         }
         if (!hasVehicleStack()) {
@@ -63,23 +78,18 @@ public final class SimurailTrainBootstrap {
         BlockPos anchor = data.starterStationAnchor();
         if (data.starterTrainPlaced()) {
             if (sourceVehicleBlockCount(level, anchor) == 0) {
-                try {
-                    Set<UUID> subLevels = subLevelIds(level);
-                    if (!subLevels.isEmpty()) {
-                        data.markStarterTrainAssembled();
-                        LastTrain.LOGGER.info(
-                                "Recovered starter Simurail train state: its source footprint "
-                                        + "is clear and Sable exposes loaded sublevel(s) {}",
-                                subLevels);
-                    } else {
-                        LastTrain.LOGGER.error(
-                                "Starter Simurail source footprint is missing, but Sable exposes "
-                                        + "no loaded sublevel; refusing to mark assembly successful");
-                    }
-                } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
+                Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
+                        level,
+                        data.campaignId());
+                if (recovered.isPresent()) {
+                    data.markStarterTrainAssembled(recovered.orElseThrow());
+                    LastTrain.LOGGER.info(
+                            "Recovered starter Simurail train {} from its campaign tag",
+                            recovered.orElseThrow());
+                } else {
                     LastTrain.LOGGER.error(
-                            "Could not verify the persisted starter Simurail sublevel",
-                            unwrap(exception));
+                            "Starter Simurail source footprint is missing and no Sable sublevel "
+                                    + "has this campaign's starter-train tag; manual recovery is required");
                 }
             }
             return;
@@ -124,26 +134,18 @@ public final class SimurailTrainBootstrap {
         int sourceBlocks = sourceVehicleBlockCount(level, anchor);
         int attempt = data.recordStarterTrainAssemblyAttempt();
         if (sourceBlocks == 0) {
-            try {
-                Set<UUID> subLevels = subLevelIds(level);
-                if (!subLevels.isEmpty()) {
-                    data.markStarterTrainAssembled();
-                    LastTrain.LOGGER.info(
-                            "Starter Create Simurail vehicle is active; "
-                                    + "Sable exposes loaded sublevel(s) {}",
-                            subLevels);
-                } else {
-                    logWaiting(
-                            attempt,
-                            "the complete source footprint is absent but Sable exposes no sublevel");
-                }
-            } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
-                if (shouldLog(attempt)) {
-                    LastTrain.LOGGER.error(
-                            "Could not verify the moved starter Simurail vehicle on attempt {}",
-                            attempt,
-                            unwrap(exception));
-                }
+            Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
+                    level,
+                    data.campaignId());
+            if (recovered.isPresent()) {
+                data.markStarterTrainAssembled(recovered.orElseThrow());
+                LastTrain.LOGGER.info(
+                        "Recovered active starter Simurail train {} from its campaign tag",
+                        recovered.orElseThrow());
+            } else {
+                logWaiting(
+                        attempt,
+                        "the source footprint is absent and no Sable sublevel carries this campaign tag");
             }
             return;
         }
@@ -184,12 +186,18 @@ public final class SimurailTrainBootstrap {
             // null, so success requires both a new Sable ID and a fully-cleared
             // 18-block source footprint.
             int remainingBlocks = sourceVehicleBlockCount(level, anchor);
-            if (remainingBlocks == 0 && !newSubLevels.isEmpty()) {
-                data.markStarterTrainAssembled();
+            if (remainingBlocks == 0 && newSubLevels.size() == 1) {
+                UUID trainId = newSubLevels.iterator().next();
+                if (!SableTrainTracker.tagStarterTrain(level, trainId, data.campaignId())) {
+                    LastTrain.LOGGER.warn(
+                            "Starter train {} assembled, but its secondary Sable recovery tag could not be written",
+                            trainId);
+                }
+                data.markStarterTrainAssembled(trainId);
                 LastTrain.LOGGER.info(
-                        "Starter train assembled into Sable sublevel(s) {} "
+                        "Starter train assembled into Sable sublevel {} "
                                 + "with Create Simurail alpha e68481d on attempt {}",
-                        newSubLevels,
+                        trainId,
                         attempt);
             } else {
                 Object failure = lastFailure.invoke(assembler);
@@ -209,7 +217,9 @@ public final class SimurailTrainBootstrap {
                             failure != null
                                     ? "Simulated rejected the layout: " + failure
                                     : remainingBlocks == 0
-                                            ? "the source moved but Sable exposed no new sublevel ID"
+                                            ? "the source moved but Sable exposed "
+                                                    + newSubLevels.size()
+                                                    + " new sublevel IDs instead of exactly one"
                                             : "the assembler did not move the complete source layout");
                 }
             }

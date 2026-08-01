@@ -3,13 +3,14 @@ package dev.ywsabc.lasttrain.route;
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.server.SableTrainTracker;
+import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -96,16 +97,29 @@ public final class RouteDirector {
     }
 
     private static int occupiedSegment(ServerLevel level, CampaignSavedData data) {
-        int farthest = data.routeSegment();
-        int stationX = data.starterStationAnchor().getX();
-        for (ServerPlayer player : level.players()) {
-            if (player.isSpectator()) {
-                continue;
-            }
-            int offset = player.blockPosition().getX() - stationX;
-            farthest = Math.max(farthest, RouteGeometry.segmentForOffset(offset));
+        if (!data.starterTrainAssembled() || data.starterTrainSublevelId() == null) {
+            return data.routeSegment();
         }
-        return farthest;
+
+        Optional<net.minecraft.world.phys.Vec3> trainPosition = SableTrainTracker.position(
+                level,
+                data.starterTrainSublevelId());
+        if (trainPosition.isEmpty()) {
+            return data.routeSegment();
+        }
+
+        int stationX = data.starterStationAnchor().getX();
+        int offset = (int) Math.floor(trainPosition.orElseThrow().x) - stationX;
+        int observed = RouteGeometry.segmentForOffset(offset);
+        ActiveMission mission = data.activeMission();
+        // Every mission is a route checkpoint. The train, not a player on foot
+        // or an admin teleport, must clear it before progression can move past
+        // the segment where it was issued.
+        return RouteProgressPolicy.nextSegment(
+                data.routeSegment(),
+                data.generatedRouteSegment(),
+                observed,
+                mission == null ? null : mission.routeSegment());
     }
 
     private static boolean generateSegment(
