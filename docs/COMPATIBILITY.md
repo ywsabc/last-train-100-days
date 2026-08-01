@@ -1,6 +1,6 @@
 # 兼容性基线
 
-状态日期：2026-07-29。
+状态日期：2026-08-01（含模组事实核查，见 MOD_VERIFICATION.md）。
 
 ## 目标平台
 
@@ -11,8 +11,8 @@
 | Java | 21 |
 | 机械动力 | Create 6.0.x |
 | 汽鸣铁道 | Create: Steam 'n' Rails 1.21.1 NeoForge 移植版
-  （[Porters-of-Railways](https://github.com/Porters-of-Railways/Railway-1.21.1)），
-  版本随 Create 锁定 |
+  （[Porters-of-Railways](https://github.com/Porters-of-Railways/Railway-1.21.1)，
+  官方跳过 1.21.1，当前为非官方移植版，LGPL），版本随 Create 锁定 |
 | 物理引擎 | Sable，版本随最终载具实现锁定 |
 
 1.20.1 Forge 的通达铁路移植版不属于目标平台，不与 1.21.1 物理列车方案混用。
@@ -33,15 +33,24 @@
 
 ## 汽鸣铁道（Create: Steam 'n' Rails）
 
-[汽鸣铁道](https://www.mcmod.cn/class/6619.html) 是 Create 的铁路扩展，
-本项目使用其 1.21.1 NeoForge 移植版，补齐原生 Create 缺失的列车运营能力：
+[汽鸣铁道](https://www.mcmod.cn/class/6619.html) 是 Create 的铁路扩展。
+**官方团队跳过 1.21.1 版本**，本项目使用非官方移植版
+（[Porters-of-Railways](https://github.com/Porters-of-Railways/Railway-1.21.1)，
+LGPL，随最新版 Create 锁定；官方移植完成后需重新评估切换）。它补齐原生
+Create 缺失的列车运营能力：
 
 - **列车连挂器**：供电连接/断开两列独立列车，是"解挂、连挂、换车头"
-  的物理基础（原生 Create 无此能力）；
-- **信号机（Semaphore）**：为任务通行锁与红绿灯信息提供真实信号方块；
-- **蒸汽机车**：锅炉、燃料与蒸汽压力机制，对应动力单元的燃料/锅炉升级
-  和"司炉"分工；
-- **特殊轨道**：窄轨、幻缈轨道等，可扩展线路生成的地形适应性。
+  的物理基础（原生 Create 无此能力；配方：1 铁板 + 1 红石粉 + 1 列车机壳）；
+- **臂板信号机 + 显示链接器**：为任务通行锁与红绿灯信息提供真实信号方块
+  和状态显示；
+- **转辙器设备**：管理岔道切换（原生 Create 无此方块）；
+- **指挥机器人**：操控红石元件、携带工具箱、驾驶列车；
+- **特殊轨道**：不同轨距、幻缈/隐身轨道、倒挂单轨，扩展线路生成的地形
+  适应性。
+
+**核查纠正（2026-08-01）**：汽鸣铁道不提供"蒸汽机车烧燃料/锅炉压力"
+机制，Create 原生列车无需燃料；燃料/锅炉压力如需实现，属于 lasttrain
+自研逻辑或另选模组，不在汽鸣铁道依赖范围内。
 
 兼容性要求：
 
@@ -70,6 +79,14 @@
 
 [Ferronautics](https://www.curseforge.com/minecraft/mc-mods/ferronautics)
 可用于早期概念验证，但其定位是过渡性的粗糙 Beta，不作为正式载具后端。
+
+### Create Aeronautics（物理装配体基线）
+
+[Create Aeronautics](https://modrinth.com/mod/create-aeronautics)
+1.3.0 已发布 1.21.1 NeoForge 版本（2026-06-13），提供基于 Sable 的物理
+装配体（飞艇、飞机、车辆）。列车/铁轨场景属于其生态扩展（如 SG Tracks
+提供驱动轮/支撑轮），**铁轨上的表现需实测后决定是否作为正式载具后端**，
+不与任务与存档承诺绑定（对齐 CONTENT_SUPPLEMENT §6.2 的蓝图部署模型）。
 
 ## 载具适配策略
 

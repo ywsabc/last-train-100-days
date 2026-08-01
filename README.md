@@ -39,7 +39,8 @@
 [TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md)，模组兼容策略见
 [COMPATIBILITY.md](docs/COMPATIBILITY.md)，开发阶段见
 [ROADMAP.md](docs/ROADMAP.md)。城市定位、搜刮、任务地形与列车-尸群冲突的
-补充设计见 [CONTENT_SUPPLEMENT.md](docs/CONTENT_SUPPLEMENT.md)。
+补充设计见 [CONTENT_SUPPLEMENT.md](docs/CONTENT_SUPPLEMENT.md)，模组事实
+核查见 [MOD_VERIFICATION.md](docs/MOD_VERIFICATION.md)。
 
 ## 开发环境
 
