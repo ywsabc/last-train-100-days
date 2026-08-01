@@ -4,9 +4,9 @@ import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
-import java.util.SplittableRandom;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.SplittableRandom;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
@@ -25,8 +25,8 @@ import net.minecraft.world.level.saveddata.SavedData;
  * servers.</p>
  */
 public final class CampaignSavedData extends SavedData {
-    public static final int CURRENT_SCHEMA = 5;
-    public static final int FINAL_DAY = 100;
+    public static final int CURRENT_SCHEMA = FinalePolicy.CURRENT_SCHEMA;
+    public static final int FINAL_DAY = FinalePolicy.FINAL_DAY;
     public static final int DEFAULT_ACTIVE_TICKS_PER_DAY = 24_000;
     public static final int MAX_ROUTE_SEGMENT = 400_000;
     private static final String DATA_NAME = LastTrain.MOD_ID + "_campaign";
@@ -45,6 +45,9 @@ public final class CampaignSavedData extends SavedData {
     private int threat;
     private long missionSequence;
     private ActiveMission activeMission;
+    private UUID finaleMissionId;
+    private boolean finaleMissionCompleted;
+    private boolean finalDayElapsed;
     private boolean starterStationBuilt;
     private long starterStationAnchor;
     private boolean starterTrainPlaced;
@@ -64,6 +67,7 @@ public final class CampaignSavedData extends SavedData {
     public static CampaignSavedData load(CompoundTag tag, HolderLookup.Provider registries) {
         CampaignSavedData data = new CampaignSavedData();
         data.schemaVersion = tag.contains("schema_version") ? tag.getInt("schema_version") : 1;
+        int loadedSchema = data.schemaVersion;
         try {
             data.campaignId = UUID.fromString(tag.getString("campaign_id"));
         } catch (IllegalArgumentException ignored) {
@@ -82,6 +86,15 @@ public final class CampaignSavedData extends SavedData {
         if (tag.contains("active_mission")) {
             data.activeMission = ActiveMission.load(tag.getCompound("active_mission"), registries);
         }
+        if (tag.contains("finale_mission_id")) {
+            try {
+                data.finaleMissionId = UUID.fromString(tag.getString("finale_mission_id"));
+            } catch (IllegalArgumentException ignored) {
+                data.finaleMissionId = null;
+            }
+        }
+        data.finaleMissionCompleted = tag.getBoolean("finale_mission_completed");
+        data.finalDayElapsed = tag.getBoolean("final_day_elapsed");
         data.starterStationBuilt = tag.getBoolean("starter_station_built");
         data.starterStationAnchor = tag.getLong("starter_station_anchor");
         data.starterTrainPlaced = tag.getBoolean("starter_train_placed");
@@ -97,6 +110,7 @@ public final class CampaignSavedData extends SavedData {
         data.starterTrainAssemblyAttempts = Math.max(0, tag.getInt("starter_train_assembly_attempts"));
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
+        data.migrateFinaleState(loadedSchema);
         return data;
     }
 
@@ -116,6 +130,11 @@ public final class CampaignSavedData extends SavedData {
         if (activeMission != null) {
             tag.put("active_mission", activeMission.save(registries));
         }
+        if (finaleMissionId != null) {
+            tag.putString("finale_mission_id", finaleMissionId.toString());
+        }
+        tag.putBoolean("finale_mission_completed", finaleMissionCompleted);
+        tag.putBoolean("final_day_elapsed", finalDayElapsed);
         tag.putBoolean("starter_station_built", starterStationBuilt);
         tag.putLong("starter_station_anchor", starterStationAnchor);
         tag.putBoolean("starter_train_placed", starterTrainPlaced);
@@ -150,6 +169,27 @@ public final class CampaignSavedData extends SavedData {
         return entries;
     }
 
+    private void migrateFinaleState(int loadedSchema) {
+        FinalePolicy.MigratedState migrated = FinalePolicy.migrate(
+                loadedSchema,
+                status,
+                day,
+                finalDayElapsed,
+                finaleMissionCompleted,
+                activeMission != null);
+        status = migrated.status();
+        finalDayElapsed = migrated.finalDayElapsed();
+        finaleMissionCompleted = migrated.finaleMissionCompleted();
+
+        if (loadedSchema < 6 || day < FINAL_DAY) {
+            finaleMissionId = null;
+        }
+        if (finaleMissionCompleted && isFinaleMission(activeMission)) {
+            activeMission = null;
+        }
+        schemaVersion = CURRENT_SCHEMA;
+    }
+
     public void initialize(long worldSeed) {
         if (campaignSeed == 0L) {
             campaignSeed = mixSeed(worldSeed);
@@ -171,6 +211,15 @@ public final class CampaignSavedData extends SavedData {
             return TickOutcome.NONE;
         }
 
+        TickOutcome finaleOutcome = reconcileFinaleState();
+        if (finaleOutcome != TickOutcome.NONE) {
+            return finaleOutcome;
+        }
+
+        if (finalDayElapsed) {
+            return TickOutcome.NONE;
+        }
+
         totalActiveTicks++;
         activeTicksIntoDay++;
         if ((totalActiveTicks % 200L) == 0L) {
@@ -182,20 +231,33 @@ public final class CampaignSavedData extends SavedData {
 
         activeTicksIntoDay -= DEFAULT_ACTIVE_TICKS_PER_DAY;
         if (day >= FINAL_DAY) {
-            status = CampaignStatus.COMPLETED;
+            finalDayElapsed = true;
+            activeTicksIntoDay = 0;
             setDirty();
-            return TickOutcome.CAMPAIGN_COMPLETED;
+            TickOutcome completed = reconcileFinaleState();
+            return completed != TickOutcome.NONE
+                    ? completed
+                    : TickOutcome.FINAL_DAY_ELAPSED;
         }
 
         day++;
         threat = Math.min(100, threat + 1 + day / 20);
+        if (day >= FINAL_DAY) {
+            TickOutcome started = reconcileFinaleState();
+            setDirty();
+            return started == TickOutcome.FINALE_MISSION_STARTED
+                    ? TickOutcome.DAY_ADVANCED_WITH_FINALE
+                    : TickOutcome.DAY_ADVANCED;
+        }
         boolean generated = tryGenerateDailyMission();
         setDirty();
         return generated ? TickOutcome.DAY_ADVANCED_WITH_MISSION : TickOutcome.DAY_ADVANCED;
     }
 
     public void advanceDays(int amount) {
-        if (amount <= 0 || status == CampaignStatus.COMPLETED) {
+        if (amount <= 0
+                || status == CampaignStatus.COMPLETED
+                || status == CampaignStatus.FAILED) {
             return;
         }
         if (status == CampaignStatus.NOT_STARTED) {
@@ -205,9 +267,7 @@ public final class CampaignSavedData extends SavedData {
         day = Math.min(FINAL_DAY, day + amount);
         threat = Math.min(100, threat + amount + day / 20);
         activeTicksIntoDay = 0;
-        if (day >= FINAL_DAY) {
-            status = CampaignStatus.COMPLETED;
-        } else {
+        if (day < FINAL_DAY) {
             tryGenerateDailyMission();
         }
         setDirty();
@@ -251,7 +311,8 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean createMission(MissionType type) {
-        if (activeMission != null) {
+        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+                || activeMission != null) {
             return false;
         }
         activeMission = ActiveMission.create(type, day, routeSegment);
@@ -296,9 +357,18 @@ public final class CampaignSavedData extends SavedData {
         if (activeMission == null || activeMission.stage() != MissionStage.READY_TO_TURN_IN) {
             return false;
         }
+        boolean finale = isFinaleMission(activeMission);
         activeMission.complete();
         activeMission = null;
-        threat = Math.max(0, threat - 2);
+        if (finale) {
+            finaleMissionCompleted = true;
+            // Command turn-in also runs on the logical server thread. Resolve
+            // an already elapsed finale immediately so completion does not
+            // depend on another player-driven campaign tick.
+            reconcileFinaleState();
+        } else {
+            threat = Math.max(0, threat - 2);
+        }
         setDirty();
         return true;
     }
@@ -357,7 +427,9 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private boolean tryGenerateDailyMission() {
-        if (activeMission != null || day < 2) {
+        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+                || activeMission != null
+                || day < 2) {
             return false;
         }
 
@@ -370,7 +442,9 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private boolean tryGenerateRouteMission() {
-        if (activeMission != null || routeSegment < 1) {
+        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+                || activeMission != null
+                || routeSegment < 1) {
             return false;
         }
 
@@ -393,6 +467,45 @@ public final class CampaignSavedData extends SavedData {
     private static MissionType randomMissionType(SplittableRandom random) {
         MissionType[] types = MissionType.values();
         return types[random.nextInt(types.length)];
+    }
+
+    private TickOutcome reconcileFinaleState() {
+        FinalePolicy.Directive directive = FinalePolicy.nextDirective(
+                status,
+                day,
+                finalDayElapsed,
+                finaleMissionCompleted,
+                activeMission != null);
+        return switch (directive) {
+            case NONE -> TickOutcome.NONE;
+            case CREATE_FINALE_MISSION -> {
+                activeMission = ActiveMission.create(
+                        ensureFinaleMissionId(),
+                        MissionType.ZOMBIE_BLOCKADE,
+                        FINAL_DAY,
+                        routeSegment);
+                setDirty();
+                yield TickOutcome.FINALE_MISSION_STARTED;
+            }
+            case COMPLETE_CAMPAIGN -> {
+                status = CampaignStatus.COMPLETED;
+                setDirty();
+                yield TickOutcome.CAMPAIGN_COMPLETED;
+            }
+        };
+    }
+
+    private UUID ensureFinaleMissionId() {
+        if (finaleMissionId == null) {
+            finaleMissionId = FinalePolicy.missionId(campaignId);
+        }
+        return finaleMissionId;
+    }
+
+    public boolean isFinaleMission(ActiveMission mission) {
+        return mission != null
+                && finaleMissionId != null
+                && finaleMissionId.equals(mission.id());
     }
 
     private static long mixSeed(long seed) {
@@ -440,6 +553,18 @@ public final class CampaignSavedData extends SavedData {
         return activeMission;
     }
 
+    public UUID finaleMissionId() {
+        return finaleMissionId;
+    }
+
+    public boolean finaleMissionCompleted() {
+        return finaleMissionCompleted;
+    }
+
+    public boolean finalDayElapsed() {
+        return finalDayElapsed;
+    }
+
     public boolean starterStationBuilt() {
         return starterStationBuilt;
     }
@@ -468,6 +593,9 @@ public final class CampaignSavedData extends SavedData {
         NONE,
         DAY_ADVANCED,
         DAY_ADVANCED_WITH_MISSION,
+        DAY_ADVANCED_WITH_FINALE,
+        FINALE_MISSION_STARTED,
+        FINAL_DAY_ELAPSED,
         CAMPAIGN_COMPLETED
     }
 }

@@ -2,9 +2,11 @@ package dev.ywsabc.lasttrain.server;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.route.RouteDirector;
+import java.util.UUID;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -42,6 +44,22 @@ public final class CampaignEvents {
             return;
         }
 
+        if (data.status() == CampaignStatus.NOT_STARTED) {
+            UUID trainId = data.starterTrainSublevelId();
+            boolean trainLocated = trainId != null
+                    && SableTrainTracker.position(server.overworld(), trainId).isPresent();
+            if (CampaignStartPolicy.shouldAutoStart(
+                            true,
+                            data.starterStationBuilt(),
+                            data.starterTrainAssembled(),
+                            trainId != null,
+                            trainLocated)
+                    && data.start()) {
+                IntegrationBridge.syncCampaignNumbers(server, data);
+                broadcast(server, Component.translatable("message.lasttrain.campaign_started"));
+            }
+        }
+
         CampaignSavedData.TickOutcome outcome = data.tick();
         if (outcome != CampaignSavedData.TickOutcome.NONE) {
             IntegrationBridge.syncCampaignNumbers(server, data);
@@ -50,14 +68,15 @@ public final class CampaignEvents {
             case DAY_ADVANCED -> broadcast(server, Component.translatable("message.lasttrain.day_advanced", data.day()));
             case DAY_ADVANCED_WITH_MISSION -> {
                 broadcast(server, Component.translatable("message.lasttrain.day_advanced", data.day()));
-                ActiveMission mission = data.activeMission();
-                if (mission != null) {
-                    broadcast(server, Component.translatable(
-                            "message.lasttrain.mission_generated",
-                            Component.translatable("mission.lasttrain." + mission.type().serializedName()),
-                            mission.routeSegment()));
-                }
+                broadcastMission(server, data.activeMission());
             }
+            case DAY_ADVANCED_WITH_FINALE -> {
+                broadcast(server, Component.translatable("message.lasttrain.day_advanced", data.day()));
+                broadcastFinale(server, data.activeMission());
+            }
+            case FINALE_MISSION_STARTED -> broadcastFinale(server, data.activeMission());
+            case FINAL_DAY_ELAPSED ->
+                    broadcast(server, Component.translatable("message.lasttrain.final_day_elapsed"));
             case CAMPAIGN_COMPLETED ->
                     broadcast(server, Component.translatable("message.lasttrain.campaign_completed"));
             case NONE -> {
@@ -67,5 +86,25 @@ public final class CampaignEvents {
 
     private static void broadcast(MinecraftServer server, Component message) {
         server.getPlayerList().broadcastSystemMessage(message, false);
+    }
+
+    private static void broadcastMission(MinecraftServer server, ActiveMission mission) {
+        if (mission == null) {
+            return;
+        }
+        broadcast(server, Component.translatable(
+                "message.lasttrain.mission_generated",
+                Component.translatable("mission.lasttrain." + mission.type().serializedName()),
+                mission.routeSegment()));
+    }
+
+    private static void broadcastFinale(MinecraftServer server, ActiveMission mission) {
+        if (mission == null) {
+            return;
+        }
+        broadcast(server, Component.translatable(
+                "message.lasttrain.finale_started",
+                mission.target(),
+                mission.routeSegment()));
     }
 }

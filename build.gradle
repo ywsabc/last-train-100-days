@@ -119,6 +119,11 @@ neoForge {
 // "optional", meaning it will not be pulled by dependents of this mod.
 configurations {
     runtimeClasspath.extendsFrom localRuntime
+    // Main Minecraft/NeoForge dependencies are injected by ModDevGradle into
+    // dedicated configurations rather than `implementation`. Reuse them for
+    // lightweight SavedData unit tests without launching a game test server.
+    testCompileClasspath.extendsFrom modDevCompileDependencies
+    testRuntimeClasspath.extendsFrom modDevRuntimeDependencies
 }
 
 dependencies {

@@ -28,6 +28,7 @@ public final class WorldBootstrap {
 
     public static void ensureStarterStation(ServerLevel level, CampaignSavedData data) {
         if (data.starterStationBuilt()) {
+            migrateLegacyCanopyClearance(level, data.starterStationAnchor());
             return;
         }
 
@@ -83,7 +84,7 @@ public final class WorldBootstrap {
 
     private static void buildCanopy(ServerLevel level, BlockPos anchor) {
         for (int x : new int[]{-9, -3, 3, 9}) {
-            for (int z : new int[]{-3, 3}) {
+            for (int z : new int[]{-4, 4}) {
                 for (int y = 1; y <= 4; y++) {
                     level.setBlock(
                             anchor.offset(x, y, z),
@@ -105,11 +106,52 @@ public final class WorldBootstrap {
         }
 
         for (int x : new int[]{-6, 0, 6}) {
-            for (int z : new int[]{-3, 3}) {
+            for (int z : new int[]{-4, 4}) {
                 level.setBlock(
                         anchor.offset(x, 4, z),
                         Blocks.LANTERN.defaultBlockState(),
                         UPDATE_ALL);
+            }
+        }
+    }
+
+    /**
+     * Moves canopy details created by the original prototype one block away
+     * from the track. The Simurail gathering deck reaches z=3, so leaving the
+     * old posts there would both block initial layout validation and collide
+     * with the assembled body as it departed. Only exact bootstrap blocks are
+     * touched; player-built replacements remain an explicit obstruction.
+     */
+    private static void migrateLegacyCanopyClearance(ServerLevel level, BlockPos anchor) {
+        for (int x : new int[]{-9, -3, 3, 9}) {
+            for (int oldZ : new int[]{-3, 3}) {
+                int newZ = oldZ < 0 ? -4 : 4;
+                for (int y = 1; y <= 4; y++) {
+                    BlockPos oldPos = anchor.offset(x, y, oldZ);
+                    if (!level.getBlockState(oldPos).is(Blocks.STRIPPED_SPRUCE_LOG)) {
+                        continue;
+                    }
+                    BlockPos newPos = anchor.offset(x, y, newZ);
+                    if (level.getBlockState(newPos).isAir()) {
+                        level.setBlock(newPos, level.getBlockState(oldPos), UPDATE_ALL);
+                    }
+                    level.setBlock(oldPos, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                }
+            }
+        }
+
+        for (int x : new int[]{-6, 0, 6}) {
+            for (int oldZ : new int[]{-3, 3}) {
+                BlockPos oldPos = anchor.offset(x, 4, oldZ);
+                if (!level.getBlockState(oldPos).is(Blocks.LANTERN)) {
+                    continue;
+                }
+                int newZ = oldZ < 0 ? -4 : 4;
+                BlockPos newPos = anchor.offset(x, 4, newZ);
+                if (level.getBlockState(newPos).isAir()) {
+                    level.setBlock(newPos, level.getBlockState(oldPos), UPDATE_ALL);
+                }
+                level.setBlock(oldPos, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
             }
         }
     }

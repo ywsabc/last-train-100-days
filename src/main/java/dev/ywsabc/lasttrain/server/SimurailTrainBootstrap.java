@@ -4,7 +4,6 @@ import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -20,6 +19,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.fml.ModList;
 
 /**
@@ -38,11 +38,9 @@ public final class SimurailTrainBootstrap {
     private static final int NORMAL_RETRY_TICKS = 40;
     private static final int SLOW_RETRY_TICKS = 200;
     private static final int SLOW_RETRY_AFTER = 30;
-    private static final int PONDER_VEHICLE_BLOCKS = 18;
+    private static final int STARTER_VEHICLE_BLOCKS = 24;
     private static final String ASSEMBLER_CLASS =
             "dev.simulated_team.simulated.content.blocks.physics_assembler.PhysicsAssemblerBlockEntity";
-    private static final String SUBLEVEL_CONTAINER_CLASS =
-            "dev.ryanhcode.sable.api.sublevel.SubLevelContainer";
     private static final String SUPER_GLUE_CLASS =
             "com.simibubi.create.content.contraptions.glue.SuperGlueEntity";
 
@@ -56,6 +54,7 @@ public final class SimurailTrainBootstrap {
                         level,
                         data.campaignId());
                 if (recovered.isPresent()) {
+                    SableTrainTracker.ensureForceLoaded(level, recovered.orElseThrow());
                     data.markStarterTrainAssembled(recovered.orElseThrow());
                     LastTrain.LOGGER.info(
                             "Recovered persisted starter train identity {} from its Sable tag",
@@ -65,6 +64,9 @@ public final class SimurailTrainBootstrap {
                             "The campaign says the starter train is assembled but has no saved Sable UUID. "
                                     + "Automatic recovery refuses to claim an unrelated aircraft or vehicle");
                 }
+            }
+            if (data.starterTrainSublevelId() != null) {
+                SableTrainTracker.ensureForceLoaded(level, data.starterTrainSublevelId());
             }
             return;
         }
@@ -77,11 +79,15 @@ public final class SimurailTrainBootstrap {
 
         BlockPos anchor = data.starterStationAnchor();
         if (data.starterTrainPlaced()) {
+            if (isPonderCoreLayout(level, anchor)) {
+                ensureGatheringDeck(level, anchor);
+            }
             if (sourceVehicleBlockCount(level, anchor) == 0) {
                 Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
                         level,
                         data.campaignId());
                 if (recovered.isPresent()) {
+                    SableTrainTracker.ensureForceLoaded(level, recovered.orElseThrow());
                     data.markStarterTrainAssembled(recovered.orElseThrow());
                     LastTrain.LOGGER.info(
                             "Recovered starter Simurail train {} from its campaign tag",
@@ -119,7 +125,14 @@ public final class SimurailTrainBootstrap {
     }
 
     public static void tick(ServerLevel level, CampaignSavedData data, int serverTick) {
-        if (data.starterTrainAssembled() || !data.starterTrainPlaced() || !hasVehicleStack()) {
+        if (data.starterTrainAssembled()) {
+            if (data.starterTrainSublevelId() != null
+                    && serverTick % SLOW_RETRY_TICKS == 0) {
+                SableTrainTracker.ensureForceLoaded(level, data.starterTrainSublevelId());
+            }
+            return;
+        }
+        if (!data.starterTrainPlaced() || !hasVehicleStack()) {
             return;
         }
 
@@ -131,6 +144,9 @@ public final class SimurailTrainBootstrap {
         }
 
         BlockPos anchor = data.starterStationAnchor();
+        if (isPonderCoreLayout(level, anchor)) {
+            ensureGatheringDeck(level, anchor);
+        }
         int sourceBlocks = sourceVehicleBlockCount(level, anchor);
         int attempt = data.recordStarterTrainAssemblyAttempt();
         if (sourceBlocks == 0) {
@@ -138,6 +154,7 @@ public final class SimurailTrainBootstrap {
                     level,
                     data.campaignId());
             if (recovered.isPresent()) {
+                SableTrainTracker.ensureForceLoaded(level, recovered.orElseThrow());
                 data.markStarterTrainAssembled(recovered.orElseThrow());
                 LastTrain.LOGGER.info(
                         "Recovered active starter Simurail train {} from its campaign tag",
@@ -156,7 +173,7 @@ public final class SimurailTrainBootstrap {
                     "starter source layout is incomplete or modified ("
                             + sourceBlocks
                             + "/"
-                            + PONDER_VEHICLE_BLOCKS
+                            + STARTER_VEHICLE_BLOCKS
                             + " expected blocks); refusing a partial assembly");
             return;
         }
@@ -175,22 +192,32 @@ public final class SimurailTrainBootstrap {
 
             Method assemble = assemblerType.getMethod("assembleOrDisassemble");
             Method lastFailure = assemblerType.getMethod("getLastAssemblyException");
-            Set<UUID> subLevelsBefore = subLevelIds(level);
+            Set<UUID> subLevelsBefore = SableTrainTracker.subLevelIds(level);
             assemble.invoke(assembler);
-            Set<UUID> newSubLevels = subLevelIds(level);
+            Set<UUID> newSubLevels = SableTrainTracker.subLevelIds(level);
             newSubLevels.removeAll(subLevelsBefore);
 
             // Simulated assembly is synchronous: the world blocks are moved
             // into the newly-created sublevel before the method returns. Its
             // public method clears lastException even when the helper returns
             // null, so success requires both a new Sable ID and a fully-cleared
-            // 18-block source footprint.
+            // complete 24-block source footprint.
             int remainingBlocks = sourceVehicleBlockCount(level, anchor);
             if (remainingBlocks == 0 && newSubLevels.size() == 1) {
                 UUID trainId = newSubLevels.iterator().next();
-                if (!SableTrainTracker.tagStarterTrain(level, trainId, data.campaignId())) {
+                Vec3 gatheringPoint = Vec3.atBottomCenterOf(anchor.offset(-1, 3, 2));
+                if (!SableTrainTracker.tagStarterTrain(
+                        level,
+                        trainId,
+                        data.campaignId(),
+                        gatheringPoint)) {
                     LastTrain.LOGGER.warn(
                             "Starter train {} assembled, but its secondary Sable recovery tag could not be written",
+                            trainId);
+                }
+                if (!SableTrainTracker.ensureForceLoaded(level, trainId)) {
+                    LastTrain.LOGGER.warn(
+                            "Starter train {} assembled, but its persisted Sable force-load ticket could not be added",
                             trainId);
                 }
                 data.markStarterTrainAssembled(trainId);
@@ -202,7 +229,7 @@ public final class SimurailTrainBootstrap {
             } else {
                 Object failure = lastFailure.invoke(assembler);
                 if (remainingBlocks > 0
-                        && remainingBlocks < PONDER_VEHICLE_BLOCKS
+                        && remainingBlocks < STARTER_VEHICLE_BLOCKS
                         && !newSubLevels.isEmpty()) {
                     LastTrain.LOGGER.error(
                             "Create Simurail produced partial starter assembly {}: "
@@ -210,7 +237,7 @@ public final class SimurailTrainBootstrap {
                                     + "because invoking the moved primary assembler would start disassembly",
                             newSubLevels,
                             remainingBlocks,
-                            PONDER_VEHICLE_BLOCKS);
+                            STARTER_VEHICLE_BLOCKS);
                 } else {
                     logWaiting(
                             attempt,
@@ -237,6 +264,14 @@ public final class SimurailTrainBootstrap {
         BlockState track = state("create:track", "shape", "xo", "turn", "false", "waterlogged", "false");
         for (int x = -32; x <= 24; x++) {
             if (Math.abs(x) > 10) {
+                for (int y = 1; y <= 6; y++) {
+                    for (int z = -3; z <= 3; z++) {
+                        BlockPos clearance = anchor.offset(x, y, z);
+                        if (!level.getBlockState(clearance).isAir()) {
+                            level.setBlock(clearance, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                        }
+                    }
+                }
                 level.setBlock(anchor.offset(x, 0, 0), Blocks.POLISHED_ANDESITE.defaultBlockState(), UPDATE_ALL);
             }
             level.setBlock(anchor.offset(x, 1, 0), track, UPDATE_ALL);
@@ -263,6 +298,12 @@ public final class SimurailTrainBootstrap {
         for (int x = -3; x <= 0; x++) {
             place(level, anchor, x, 2, -1, planks);
             place(level, anchor, x, 2, 1, planks);
+        }
+        // Extend the unobstructed east-side walkway into a genuine 3x3
+        // gathering deck. Its center has two clear blocks above it.
+        for (int x = -2; x <= 0; x++) {
+            place(level, anchor, x, 2, 2, planks);
+            place(level, anchor, x, 2, 3, planks);
         }
         place(level, anchor, -1, 2, 0, planks);
 
@@ -305,7 +346,7 @@ public final class SimurailTrainBootstrap {
     private static void ensureAssemblyGlue(ServerLevel level, BlockPos anchor)
             throws ReflectiveOperationException {
         BlockPos min = anchor.offset(-3, 2, -1);
-        BlockPos max = anchor.offset(0, 3, 1);
+        BlockPos max = anchor.offset(0, 3, 3);
         AABB bounds = new AABB(
                 min.getX(),
                 min.getY(),
@@ -360,7 +401,7 @@ public final class SimurailTrainBootstrap {
         return key != null && key.toString().equals(id);
     }
 
-    private static boolean isExpectedVehicleLayout(ServerLevel level, BlockPos anchor) {
+    private static boolean isPonderCoreLayout(ServerLevel level, BlockPos anchor) {
         if (!isBlock(level, anchor.offset(-3, 2, 0), "simurail:physics_bogey")
                 || !isBlock(level, anchor.offset(0, 2, 0), "simurail:physics_bogey")
                 || !isBlock(level, anchor.offset(-2, 2, 0), "create:encased_chain_drive")
@@ -381,6 +422,46 @@ public final class SimurailTrainBootstrap {
                 && isBlock(level, anchor.offset(-3, 3, 1), "minecraft:lever");
     }
 
+    private static boolean isExpectedVehicleLayout(ServerLevel level, BlockPos anchor) {
+        if (!isPonderCoreLayout(level, anchor)) {
+            return false;
+        }
+        // The 3x3 deck spans x=-2..0 and z=1..3. Every floor block is
+        // solid oak and both blocks above every cell must remain clear.
+        for (int x = -2; x <= 0; x++) {
+            for (int z = 1; z <= 3; z++) {
+                if (!isBlock(level, anchor.offset(x, 2, z), "minecraft:oak_planks")
+                        || !level.getBlockState(anchor.offset(x, 3, z)).isAir()
+                        || !level.getBlockState(anchor.offset(x, 4, z)).isAir()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Idempotently upgrades the original 18-block proof vehicle's walkway. */
+    private static boolean ensureGatheringDeck(ServerLevel level, BlockPos anchor) {
+        for (int x = -2; x <= 0; x++) {
+            for (int z = 2; z <= 3; z++) {
+                BlockPos pos = anchor.offset(x, 2, z);
+                BlockState existing = level.getBlockState(pos);
+                if (!existing.isAir() && !isBlock(level, pos, "minecraft:oak_planks")) {
+                    return false;
+                }
+            }
+        }
+        for (int x = -2; x <= 0; x++) {
+            for (int z = 2; z <= 3; z++) {
+                BlockPos pos = anchor.offset(x, 2, z);
+                if (level.getBlockState(pos).isAir()) {
+                    level.setBlock(pos, Blocks.OAK_PLANKS.defaultBlockState(), UPDATE_ALL);
+                }
+            }
+        }
+        return true;
+    }
+
     private static int sourceVehicleBlockCount(ServerLevel level, BlockPos anchor) {
         int blocks = 0;
         blocks += occupied(level, anchor.offset(-3, 2, 0));
@@ -394,6 +475,10 @@ public final class SimurailTrainBootstrap {
             blocks += occupied(level, anchor.offset(x, 2, -1));
             blocks += occupied(level, anchor.offset(x, 2, 1));
         }
+        for (int x = -2; x <= 0; x++) {
+            blocks += occupied(level, anchor.offset(x, 2, 2));
+            blocks += occupied(level, anchor.offset(x, 2, 3));
+        }
         blocks += occupied(level, anchor.offset(-3, 3, -1));
         blocks += occupied(level, anchor.offset(-3, 3, 0));
         blocks += occupied(level, anchor.offset(-3, 3, 1));
@@ -402,30 +487,6 @@ public final class SimurailTrainBootstrap {
 
     private static int occupied(ServerLevel level, BlockPos pos) {
         return level.getBlockState(pos).isAir() ? 0 : 1;
-    }
-
-    private static Set<UUID> subLevelIds(ServerLevel level) throws ReflectiveOperationException {
-        Class<?> containerType = Class.forName(SUBLEVEL_CONTAINER_CLASS);
-        Object container = containerType.getMethod("getContainer", ServerLevel.class)
-                .invoke(null, level);
-        if (container == null) {
-            throw new IllegalStateException("Sable has not initialized its server sublevel container");
-        }
-
-        Object value = containerType.getMethod("getAllSubLevels").invoke(container);
-        if (!(value instanceof Iterable<?> subLevels)) {
-            throw new IllegalStateException("Sable getAllSubLevels() no longer returns an iterable value");
-        }
-
-        Set<UUID> ids = new HashSet<>();
-        for (Object subLevel : subLevels) {
-            Object id = subLevel.getClass().getMethod("getUniqueId").invoke(subLevel);
-            if (!(id instanceof UUID uuid)) {
-                throw new IllegalStateException("Sable sublevel has no UUID identity");
-            }
-            ids.add(uuid);
-        }
-        return ids;
     }
 
     private static BlockPos assemblerPos(BlockPos anchor) {

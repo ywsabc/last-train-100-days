@@ -31,12 +31,19 @@ public final class LastTrain {
         NeoForge.EVENT_BUS.addListener(CampaignEvents::onServerStarted);
         NeoForge.EVENT_BUS.addListener(CampaignEvents::onServerTick);
         NeoForge.EVENT_BUS.addListener(PlayerEvents::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(PlayerEvents::onPlayerRespawn);
+        NeoForge.EVENT_BUS.addListener(PlayerEvents::onPlayerLoggedOut);
+        NeoForge.EVENT_BUS.addListener(PlayerEvents::onServerTick);
+        NeoForge.EVENT_BUS.addListener(PlayerEvents::onServerStopping);
         NeoForge.EVENT_BUS.addListener(
                 EventPriority.LOWEST,
                 false,
                 LivingDeathEvent.class,
                 MissionEvents::onLivingDeath);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onEntityJoin);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onBlockBreak);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onExplosionDetonate);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onPistonPre);
         TaczGunfireBridge.install(NeoForge.EVENT_BUS);
         LOGGER.info("Last Train campaign core is loading");
     }

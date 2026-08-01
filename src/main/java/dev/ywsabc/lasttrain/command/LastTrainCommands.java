@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
@@ -175,6 +176,11 @@ public final class LastTrainCommands {
         context.getSource().sendSuccess(
                 () -> Component.translatable("command.lasttrain.mission.completed"),
                 true);
+        if (data.status() == CampaignStatus.COMPLETED) {
+            context.getSource().getServer().getPlayerList().broadcastSystemMessage(
+                    Component.translatable("message.lasttrain.campaign_completed"),
+                    false);
+        }
         IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
         return 1;
     }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class ActiveMissionTest {
@@ -43,5 +44,19 @@ class ActiveMissionTest {
         assertTrue(mission.setObservedProgress(1));
         assertEquals(1, mission.progress());
         assertEquals(MissionStage.ACTIVE, mission.stage());
+    }
+
+    @Test
+    void callerCanProvideAPersistentMissionId() {
+        UUID id = UUID.randomUUID();
+
+        ActiveMission mission = ActiveMission.create(
+                id,
+                MissionType.ZOMBIE_BLOCKADE,
+                100,
+                42);
+
+        assertEquals(id, mission.id());
+        assertEquals(MissionType.ZOMBIE_BLOCKADE, mission.type());
     }
 }

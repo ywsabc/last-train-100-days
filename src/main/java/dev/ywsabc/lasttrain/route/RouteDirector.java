@@ -2,6 +2,7 @@ package dev.ywsabc.lasttrain.route;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.integration.TongDaTrackBridge;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
 import java.util.Optional;
@@ -13,16 +14,16 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.fml.ModList;
 
 /**
  * Incrementally materializes an unbounded, deterministic route continuity
  * corridor in front of the party.
  *
- * <p>The director generates at most one 64-block segment per second and only
- * keeps two segments ahead. It complements TongDa's richer generated railways
- * rather than keeping a huge permanently-loaded world.</p>
+ * <p>The director prepares at most one 64-block segment per second and keeps
+ * only two segments ahead. TongDa's track spawner owns physical track
+ * placement; persistent route progress advances only after all 64 Create
+ * tracks are observed with the expected shape.</p>
  */
 public final class RouteDirector {
     private static final int UPDATE_ALL = 3;
@@ -32,6 +33,8 @@ public final class RouteDirector {
     private static final int VEHICLE_CLEARANCE_RADIUS = 3;
     private static final int VEHICLE_CLEARANCE_HEIGHT = 6;
     private static boolean missingCreateTrackLogged;
+    private static int lastReportedTongDaSegment = -1;
+    private static TongDaTrackBridge.SubmissionStatus lastReportedTongDaStatus;
 
     private RouteDirector() {
     }
@@ -39,7 +42,8 @@ public final class RouteDirector {
     public static void tick(MinecraftServer server, CampaignSavedData data, int serverTick) {
         if (serverTick % TICK_INTERVAL != 0
                 || !data.starterStationBuilt()
-                || !ModList.get().isLoaded("create")) {
+                || !ModList.get().isLoaded("create")
+                || !ModList.get().isLoaded(TongDaTrackBridge.TONGDA_MOD_ID)) {
             return;
         }
 
@@ -77,12 +81,15 @@ public final class RouteDirector {
                     desiredSegment,
                     RouteGeometry.missionSegment(mission.routeSegment()));
         }
+        desiredSegment = Math.min(CampaignSavedData.MAX_ROUTE_SEGMENT, desiredSegment);
 
         int nextSegment = data.generatedRouteSegment() + 1;
         if (nextSegment <= desiredSegment && generateSegment(level, data, trackBlock, nextSegment)) {
             data.markRouteSegmentGenerated(nextSegment);
+            lastReportedTongDaSegment = -1;
+            lastReportedTongDaStatus = null;
             LastTrain.LOGGER.info(
-                    "Generated guaranteed route segment {} (through x offset {})",
+                    "TongDa materialized guaranteed route segment {} (through x offset {})",
                     nextSegment,
                     RouteGeometry.segmentEndOffset(nextSegment));
         }
@@ -139,22 +146,30 @@ public final class RouteDirector {
             return false;
         }
 
-        BlockState track = RouteTrackStates.eastbound(trackBlock);
         for (int offset = startOffset; offset <= endOffset; offset++) {
             BlockPos deckCenter = station.offset(offset, 0, 0);
-            clearVehicleEnvelope(level, deckCenter);
+            clearVehicleEnvelope(level, deckCenter, trackBlock);
             for (int z = -1; z <= 1; z++) {
                 level.setBlock(
                         deckCenter.offset(0, 0, z),
                         Blocks.POLISHED_ANDESITE.defaultBlockState(),
                         UPDATE_ALL);
             }
-            level.setBlock(deckCenter.above(), track, UPDATE_ALL);
-
             if ((offset - startOffset) % 8 == 0) {
                 placeSupport(level, deckCenter.offset(0, -1, -1));
                 placeSupport(level, deckCenter.offset(0, -1, 1));
             }
+        }
+
+        BlockPos trackStart = station.offset(startOffset, 1, 0);
+        TongDaTrackBridge.SegmentInspection inspection =
+                TongDaTrackBridge.inspectEastboundSegment(level, trackStart);
+        if (!inspection.actuallyComplete()) {
+            prepareTongDaControlPosition(level, inspection.spawnerPosition());
+            TongDaTrackBridge.SubmissionResult submission =
+                    TongDaTrackBridge.submitEastboundSegment(level, trackStart);
+            reportTongDaStatus(segment, submission);
+            return false;
         }
 
         if (segment % 4 == 0) {
@@ -163,14 +178,61 @@ public final class RouteDirector {
         return true;
     }
 
-    private static void clearVehicleEnvelope(ServerLevel level, BlockPos deckCenter) {
+    private static void clearVehicleEnvelope(
+            ServerLevel level,
+            BlockPos deckCenter,
+            Block trackBlock) {
         for (int y = 1; y <= VEHICLE_CLEARANCE_HEIGHT; y++) {
             for (int z = -VEHICLE_CLEARANCE_RADIUS; z <= VEHICLE_CLEARANCE_RADIUS; z++) {
                 BlockPos pos = deckCenter.offset(0, y, z);
+                if (y == 1 && z == 0 && level.getBlockState(pos).is(trackBlock)) {
+                    continue;
+                }
                 if (!level.getBlockState(pos).isAir()) {
                     level.setBlock(pos, Blocks.AIR.defaultBlockState(), UPDATE_CLEARING);
                 }
             }
+        }
+    }
+
+    private static void prepareTongDaControlPosition(ServerLevel level, BlockPos spawnerPosition) {
+        BlockStateIds ids = new BlockStateIds(
+                registeredBlock("tongdarailway:track_spawner"),
+                registeredBlock("create:rose_quartz_lamp"));
+        Block existing = level.getBlockState(spawnerPosition).getBlock();
+        if (existing != Blocks.AIR
+                && existing != ids.spawner()
+                && existing != ids.completedMarker()) {
+            // z=+4 is a reserved control lane outside the train clearance.
+            // Clear natural terrain before TongDa owns this deterministic cell.
+            level.setBlock(spawnerPosition, Blocks.AIR.defaultBlockState(), UPDATE_CLEARING);
+        }
+    }
+
+    private static void reportTongDaStatus(
+            int segment,
+            TongDaTrackBridge.SubmissionResult result) {
+        if (segment == lastReportedTongDaSegment && result.status() == lastReportedTongDaStatus) {
+            return;
+        }
+        lastReportedTongDaSegment = segment;
+        lastReportedTongDaStatus = result.status();
+        switch (result.status()) {
+            case QUEUED -> LastTrain.LOGGER.info(
+                    "Queued route segment {} through TongDa at {}",
+                    segment,
+                    result.spawnerPosition());
+            case MATERIALIZATION_PENDING -> LastTrain.LOGGER.debug(
+                    "TongDa is materializing route segment {} at {}",
+                    segment,
+                    result.spawnerPosition());
+            case ALREADY_COMPLETE -> {
+            }
+            default -> LastTrain.LOGGER.warn(
+                    "TongDa route segment {} is paused ({}): {}",
+                    segment,
+                    result.status(),
+                    result.detail());
         }
     }
 
@@ -224,5 +286,8 @@ public final class RouteDirector {
                                 "mission.lasttrain." + mission.type().serializedName()),
                         mission.routeSegment()),
                 false);
+    }
+
+    private record BlockStateIds(Block spawner, Block completedMarker) {
     }
 }

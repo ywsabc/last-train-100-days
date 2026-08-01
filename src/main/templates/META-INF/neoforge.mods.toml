@@ -89,6 +89,54 @@ Supports single-player, worlds opened to multiplayer, and dedicated servers.
     ordering="NONE"
     side="BOTH"
 
+[[dependencies.${mod_id}]]
+    modId="create"
+    type="required"
+    reason="The campaign route and starter vehicle require the pinned Create track API."
+    versionRange="[6.0.10,6.1.0)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="tongdarailway"
+    type="required"
+    reason="TongDa Railway materializes the generated survival route and stations."
+    versionRange="[1.1.3,1.2)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="simurail"
+    type="required"
+    reason="Create Simurail supplies the specified Sable/Aeronautics physical train."
+    versionRange="[0.0.0-a,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="sable"
+    type="required"
+    reason="Sable provides the physical moving sublevel used by Create Simurail."
+    versionRange="[2.0.3,2.1)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="aeronautics_bundled"
+    type="required"
+    reason="The physical train requires the pinned Create Aeronautics simulated-physics runtime."
+    versionRange="[1.3.0,1.4)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="tacz"
+    type="required"
+    reason="TaCZ provides the firearms and ammunition used by the survival campaign."
+    versionRange="[1.1.8,1.2)"
+    ordering="AFTER"
+    side="BOTH"
+
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares
 # that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't
 # stop your mod loading on the server for example.

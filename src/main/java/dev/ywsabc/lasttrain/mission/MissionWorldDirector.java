@@ -5,8 +5,11 @@ import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteTrackStates;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -23,7 +26,6 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
-import net.minecraft.world.phys.AABB;
 
 /**
  * Materializes mission state into ordinary server-authoritative world
@@ -48,6 +50,12 @@ public final class MissionWorldDirector {
         if (mission == null) {
             return;
         }
+        // Reconciliation is deliberately periodic: it repairs entity/save
+        // skew quickly without scanning every loaded entity twenty times per
+        // second for the whole duration of a blockade.
+        if (canReconcileZombieBlockade(server, data, mission)) {
+            reconcileZombieBlockade(server.overworld(), mission);
+        }
 
         if (mission.site() == null) {
             data.assignMissionSite(RouteDirector.missionAnchor(data, mission.routeSegment()));
@@ -58,6 +66,12 @@ public final class MissionWorldDirector {
         if (site == null
                 || data.generatedRouteSegment() < requiredSegment
                 || !server.overworld().hasChunkAt(site)) {
+            return;
+        }
+
+        if (mission.type() == MissionType.ZOMBIE_BLOCKADE
+                && !mission.worldPrepared()
+                && !hasNearbyPlayer(server.overworld(), site)) {
             return;
         }
 
@@ -76,6 +90,9 @@ public final class MissionWorldDirector {
             mission = data.activeMission();
         }
 
+        if (!repairPreparedMission(server.overworld(), mission)) {
+            return;
+        }
         if (mission.stage() == MissionStage.READY_TO_TURN_IN) {
             // SavedData and chunk saves are not one atomic transaction. Repair
             // the passable route idempotently after a restart even when the
@@ -86,11 +103,6 @@ public final class MissionWorldDirector {
         if (mission.stage() != MissionStage.ACTIVE) {
             return;
         }
-        if (mission.type() == MissionType.ZOMBIE_BLOCKADE
-                && !hasNearbyPlayer(server.overworld(), site)) {
-            return;
-        }
-
         int observed = observeProgress(server.overworld(), mission);
         MissionStage before = mission.stage();
         if (data.setMissionObservedProgress(observed)
@@ -190,26 +202,7 @@ public final class MissionWorldDirector {
         int[] offsets = {-1, 1};
         for (int index = 0; index < offsets.length; index++) {
             BlockPos lower = mission.site().offset(offsets[index], 0, 4);
-            level.setBlock(
-                    lower,
-                    state(
-                            Blocks.IRON_DOOR,
-                            "facing", "east",
-                            "half", "lower",
-                            "hinge", index == 0 ? "left" : "right",
-                            "open", "false",
-                            "powered", "false"),
-                    UPDATE_ALL);
-            level.setBlock(
-                    lower.above(),
-                    state(
-                            Blocks.IRON_DOOR,
-                            "facing", "east",
-                            "half", "upper",
-                            "hinge", index == 0 ? "left" : "right",
-                            "open", "false",
-                            "powered", "false"),
-                    UPDATE_ALL);
+            placeGateDoor(level, lower, index);
             level.setBlock(
                     lower.offset(0, 0, -1),
                     state(
@@ -221,6 +214,29 @@ public final class MissionWorldDirector {
         }
         prepareRouteBarrier(level, mission.site());
         return true;
+    }
+
+    private static void placeGateDoor(ServerLevel level, BlockPos lower, int index) {
+        level.setBlock(
+                lower,
+                state(
+                        Blocks.IRON_DOOR,
+                        "facing", "east",
+                        "half", "lower",
+                        "hinge", index == 0 ? "left" : "right",
+                        "open", "false",
+                        "powered", "false"),
+                UPDATE_ALL);
+        level.setBlock(
+                lower.above(),
+                state(
+                        Blocks.IRON_DOOR,
+                        "facing", "east",
+                        "half", "upper",
+                        "hinge", index == 0 ? "left" : "right",
+                        "open", "false",
+                        "powered", "false"),
+                UPDATE_ALL);
     }
 
     private static boolean prepareSupplyRecovery(ServerLevel level, ActiveMission mission) {
@@ -251,22 +267,167 @@ public final class MissionWorldDirector {
     }
 
     private static boolean prepareZombieBlockade(ServerLevel level, ActiveMission mission) {
-        String tag = missionEntityTag(mission);
-        AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
-        int existing = level.getEntitiesOfClass(
-                        Zombie.class,
-                        bounds,
-                        zombie -> zombie.getTags().contains(tag))
-                .size();
+        return reconcileZombieBlockade(level, mission);
+    }
 
-        for (int index = existing; index < mission.target(); index++) {
+    /**
+     * Repairs only the irreplaceable mission controls. Player-authored progress
+     * (placed track, powered levers, opened doors and recovered contents) is
+     * preserved, while an explosion or accidental break cannot permanently
+     * strand the campaign checkpoint.
+     */
+    private static boolean repairPreparedMission(ServerLevel level, ActiveMission mission) {
+        if (!mission.worldPrepared() || mission.stage() != MissionStage.ACTIVE) {
+            return true;
+        }
+        try {
+            return switch (mission.type()) {
+                case RAIL_BREAK, ZOMBIE_BLOCKADE -> true;
+                case STATION_POWER -> {
+                    repairStationPower(level, mission);
+                    ensureRouteBarrier(level, mission.site());
+                    yield true;
+                }
+                case STATION_GATE -> {
+                    repairStationGate(level, mission);
+                    ensureRouteBarrier(level, mission.site());
+                    yield true;
+                }
+                case SUPPLY_RECOVERY -> repairSupplyBarrels(level, mission);
+            };
+        } catch (RuntimeException exception) {
+            LastTrain.LOGGER.error(
+                    "Could not repair mission controls for {} at {}",
+                    mission.id(),
+                    mission.site(),
+                    exception);
+            return false;
+        }
+    }
+
+    private static void repairStationPower(ServerLevel level, ActiveMission mission) {
+        for (int offset : new int[]{-3, -1, 1, 3}) {
+            BlockPos base = mission.site().offset(offset, -1, 4);
+            if (!level.getBlockState(base).is(Blocks.IRON_BLOCK)) {
+                level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
+            }
+            BlockPos lever = base.above();
+            if (!level.getBlockState(lever).is(Blocks.LEVER)) {
+                level.setBlock(
+                        lever,
+                        state(
+                                Blocks.LEVER,
+                                "face", "floor",
+                                "facing", "north",
+                                "powered", "false"),
+                        UPDATE_ALL);
+            }
+            BlockPos lamp = base.offset(0, 0, 1);
+            if (!level.getBlockState(lamp).is(Blocks.REDSTONE_LAMP)) {
+                level.setBlock(lamp, Blocks.REDSTONE_LAMP.defaultBlockState(), UPDATE_ALL);
+            }
+        }
+    }
+
+    private static void repairStationGate(ServerLevel level, ActiveMission mission) {
+        int[] offsets = {-1, 1};
+        for (int index = 0; index < offsets.length; index++) {
+            BlockPos lower = mission.site().offset(offsets[index], 0, 4);
+            if (!level.getBlockState(lower).is(Blocks.IRON_DOOR)
+                    || !level.getBlockState(lower.above()).is(Blocks.IRON_DOOR)) {
+                placeGateDoor(level, lower, index);
+            }
+            BlockPos lever = lower.offset(0, 0, -1);
+            if (!level.getBlockState(lever).is(Blocks.LEVER)) {
+                level.setBlock(
+                        lever,
+                        state(
+                                Blocks.LEVER,
+                                "face", "floor",
+                                "facing", "north",
+                                "powered", "false"),
+                        UPDATE_ALL);
+            }
+        }
+    }
+
+    private static boolean repairSupplyBarrels(ServerLevel level, ActiveMission mission) {
+        for (int index = 0; index < 5; index++) {
+            BlockPos barrelPos = mission.site().offset(index - 2, 0, 4);
+            if (!level.getBlockState(barrelPos).is(Blocks.BARREL)) {
+                level.setBlock(barrelPos, Blocks.BARREL.defaultBlockState(), UPDATE_ALL);
+            }
+            BlockEntity blockEntity = level.getBlockEntity(barrelPos);
+            if (!(blockEntity instanceof Container)) {
+                level.setBlock(barrelPos, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                level.setBlock(barrelPos, Blocks.BARREL.defaultBlockState(), UPDATE_ALL);
+                blockEntity = level.getBlockEntity(barrelPos);
+            }
+            if (!(blockEntity instanceof Container)) {
+                return false;
+            }
+            blockEntity.getPersistentData().putString(
+                    SUPPLY_MISSION_ID_KEY,
+                    mission.id().toString());
+            blockEntity.getPersistentData().putInt(SUPPLY_INDEX_KEY, index);
+            blockEntity.setChanged();
+        }
+        return true;
+    }
+
+    private static boolean canReconcileZombieBlockade(
+            MinecraftServer server,
+            CampaignSavedData data,
+            ActiveMission mission) {
+        if (mission == null
+                || mission.type() != MissionType.ZOMBIE_BLOCKADE
+                || mission.stage() != MissionStage.ACTIVE
+                || !mission.worldPrepared()
+                || mission.site() == null) {
+            return false;
+        }
+        return data.generatedRouteSegment()
+                        >= RouteGeometry.missionSegment(mission.routeSegment())
+                && server.overworld().hasChunkAt(mission.site());
+    }
+
+    private static boolean reconcileZombieBlockade(ServerLevel level, ActiveMission mission) {
+        String tag = missionEntityTag(mission);
+        List<Zombie> living = new ArrayList<>();
+        for (net.minecraft.world.entity.Entity entity : level.getAllEntities()) {
+            if (entity instanceof Zombie zombie
+                    && zombie.isAlive()
+                    && !zombie.isRemoved()
+                    && zombie.getTags().contains(tag)) {
+                living.add(zombie);
+            }
+        }
+
+        ZombieBlockadePolicy.Reconciliation reconciliation =
+                ZombieBlockadePolicy.reconcile(
+                        mission.target(),
+                        mission.progress(),
+                        living.size());
+        for (int index = 0; index < reconciliation.toDiscard(); index++) {
+            living.get(living.size() - 1 - index).discard();
+        }
+
+        int retained = living.size() - reconciliation.toDiscard();
+        for (int index = 0; index < reconciliation.toSpawn(); index++) {
             Zombie zombie = EntityType.ZOMBIE.create(level);
             if (zombie == null) {
                 return false;
             }
-            int side = (index & 1) == 0 ? -1 : 1;
-            int xOffset = (index % 6) - 3;
+            int spawnOrdinal = retained + index;
+            int side = (spawnOrdinal & 1) == 0 ? -1 : 1;
+            int xOffset = (spawnOrdinal % 6) - 3;
             BlockPos spawn = mission.site().offset(xOffset, 0, side * 5);
+            for (int y = 0; y <= 2; y++) {
+                BlockPos clearance = spawn.above(y);
+                if (!level.getBlockState(clearance).isAir()) {
+                    level.setBlock(clearance, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                }
+            }
             zombie.moveTo(
                     spawn.getX() + 0.5D,
                     spawn.getY(),
@@ -388,6 +549,26 @@ public final class MissionWorldDirector {
                 UPDATE_ALL);
     }
 
+    private static void ensureRouteBarrier(ServerLevel level, BlockPos site) {
+        for (int y = 0; y <= 2; y++) {
+            for (int z = -2; z <= 2; z++) {
+                BlockPos barrier = site.offset(0, y, z);
+                if (!level.getBlockState(barrier).is(Blocks.IRON_BARS)) {
+                    level.setBlock(
+                            barrier,
+                            Blocks.IRON_BARS.defaultBlockState(),
+                            UPDATE_ALL);
+                }
+            }
+        }
+        if (!level.getBlockState(site.below()).is(Blocks.RED_CONCRETE)) {
+            level.setBlock(
+                    site.below(),
+                    Blocks.RED_CONCRETE.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+    }
+
     private static void resolveRouteBarrier(ServerLevel level, ActiveMission mission) {
         BlockPos site = mission.site();
         if (site == null) {
@@ -412,7 +593,6 @@ public final class MissionWorldDirector {
     }
 
     private static boolean hasNearbyPlayer(ServerLevel level, BlockPos site) {
-        double maxDistanceSquared = 96.0D * 96.0D;
         for (ServerPlayer player : level.players()) {
             if (player.isSpectator()) {
                 continue;
@@ -420,7 +600,8 @@ public final class MissionWorldDirector {
             double dx = player.getX() - (site.getX() + 0.5D);
             double dy = player.getY() - (site.getY() + 0.5D);
             double dz = player.getZ() - (site.getZ() + 0.5D);
-            if (dx * dx + dy * dy + dz * dz <= maxDistanceSquared) {
+            if (ZombieBlockadePolicy.isWithinActivationDistance(
+                    dx * dx + dy * dy + dz * dz)) {
                 return true;
             }
         }
@@ -433,6 +614,150 @@ public final class MissionWorldDirector {
 
     static boolean isMissionEntityTag(String tag) {
         return tag.startsWith(MISSION_ENTITY_TAG_PREFIX);
+    }
+
+    /**
+     * Identifies blocks reserved by an active, materialized mission. These
+     * blocks are repaired by the director, so allowing them to drop would
+     * create an infinite resource loop. Gate supports are included because
+     * removing one also breaks its attached control or door.
+     */
+    static boolean isProtectedMissionBlock(ActiveMission mission, BlockPos pos) {
+        if (!hasProtectedMissionBlocks(mission)) {
+            return false;
+        }
+
+        BlockPos site = mission.site();
+        int dx = pos.getX() - site.getX();
+        int dy = pos.getY() - site.getY();
+        int dz = pos.getZ() - site.getZ();
+        return switch (mission.type()) {
+            case STATION_POWER -> isRouteBarrierOffset(dx, dy, dz)
+                    || ((Math.abs(dx) == 1 || Math.abs(dx) == 3)
+                            && ((dy == -1 && (dz == 4 || dz == 5))
+                                    || (dy == 0 && dz == 4)));
+            case STATION_GATE -> isRouteBarrierOffset(dx, dy, dz)
+                    || (Math.abs(dx) == 1
+                            && ((dz == 4 && dy >= -1 && dy <= 1)
+                                    || (dz == 3 && dy >= -1 && dy <= 0)));
+            case SUPPLY_RECOVERY -> dy == 0 && dz == 4 && dx >= -2 && dx <= 2;
+            case RAIL_BREAK, ZOMBIE_BLOCKADE -> false;
+        };
+    }
+
+    static boolean hasProtectedMissionBlocks(ActiveMission mission) {
+        return mission != null
+                && mission.site() != null
+                && mission.worldPrepared()
+                && mission.stage() == MissionStage.ACTIVE
+                && mission.type() != MissionType.RAIL_BREAK
+                && mission.type() != MissionType.ZOMBIE_BLOCKADE;
+    }
+
+    static boolean containsProtectedMissionBlock(
+            ActiveMission mission,
+            Iterable<BlockPos> positions) {
+        for (BlockPos pos : positions) {
+            if (isProtectedMissionBlock(mission, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean movesIntoProtectedMissionBlock(
+            ActiveMission mission,
+            Iterable<BlockPos> sources,
+            Direction moveDirection) {
+        for (BlockPos source : sources) {
+            if (isProtectedMissionBlock(mission, source.relative(moveDirection))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isRegeneratedMissionDrop(
+            ActiveMission mission,
+            BlockPos pos,
+            ItemStack stack) {
+        return regeneratedMissionDropAt(mission, pos).matches(stack);
+    }
+
+    static RegeneratedMissionDrop regeneratedMissionDropAt(
+            ActiveMission mission,
+            BlockPos pos) {
+        if (!hasProtectedMissionBlocks(mission)) {
+            return RegeneratedMissionDrop.NONE;
+        }
+
+        BlockPos site = mission.site();
+        int dx = pos.getX() - site.getX();
+        int dy = pos.getY() - site.getY();
+        int dz = pos.getZ() - site.getZ();
+        if ((mission.type() == MissionType.STATION_POWER
+                        || mission.type() == MissionType.STATION_GATE)
+                && isRouteBarrierOffset(dx, dy, dz)) {
+            return dy == -1
+                    ? RegeneratedMissionDrop.RED_CONCRETE
+                    : RegeneratedMissionDrop.IRON_BARS;
+        }
+        return switch (mission.type()) {
+            case STATION_POWER -> {
+                if ((Math.abs(dx) == 1 || Math.abs(dx) == 3) && dz == 4) {
+                    yield dy == -1
+                            ? RegeneratedMissionDrop.IRON_BLOCK
+                            : dy == 0
+                                    ? RegeneratedMissionDrop.LEVER
+                                    : RegeneratedMissionDrop.NONE;
+                }
+                yield (Math.abs(dx) == 1 || Math.abs(dx) == 3) && dy == -1 && dz == 5
+                        ? RegeneratedMissionDrop.REDSTONE_LAMP
+                        : RegeneratedMissionDrop.NONE;
+            }
+            case STATION_GATE -> {
+                if (Math.abs(dx) == 1 && dz == 4 && dy >= 0 && dy <= 1) {
+                    yield RegeneratedMissionDrop.IRON_DOOR;
+                }
+                yield Math.abs(dx) == 1 && dy == 0 && dz == 3
+                        ? RegeneratedMissionDrop.LEVER
+                        : RegeneratedMissionDrop.NONE;
+            }
+            case SUPPLY_RECOVERY -> dy == 0 && dz == 4 && dx >= -2 && dx <= 2
+                    ? RegeneratedMissionDrop.BARREL
+                    : RegeneratedMissionDrop.NONE;
+            case RAIL_BREAK, ZOMBIE_BLOCKADE -> RegeneratedMissionDrop.NONE;
+        };
+    }
+
+    enum RegeneratedMissionDrop {
+        NONE,
+        IRON_BARS,
+        RED_CONCRETE,
+        IRON_BLOCK,
+        LEVER,
+        REDSTONE_LAMP,
+        IRON_DOOR,
+        BARREL;
+
+        boolean matches(ItemStack stack) {
+            return switch (this) {
+                case NONE -> false;
+                case IRON_BARS -> stack.is(Blocks.IRON_BARS.asItem());
+                case RED_CONCRETE -> stack.is(Blocks.RED_CONCRETE.asItem());
+                case IRON_BLOCK -> stack.is(Blocks.IRON_BLOCK.asItem());
+                case LEVER -> stack.is(Blocks.LEVER.asItem());
+                case REDSTONE_LAMP -> stack.is(Blocks.REDSTONE_LAMP.asItem());
+                case IRON_DOOR -> stack.is(Blocks.IRON_DOOR.asItem());
+                case BARREL -> stack.is(Blocks.BARREL.asItem());
+            };
+        }
+    }
+
+    private static boolean isRouteBarrierOffset(int dx, int dy, int dz) {
+        return dx == 0
+                && ((dy >= 0 && dy <= 2 && Math.abs(dz) <= 2)
+                        || (dy == -1 && dz == 0));
     }
 
     private static Block registeredBlock(String id) {

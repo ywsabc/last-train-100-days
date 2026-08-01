@@ -3,6 +3,7 @@ package dev.ywsabc.lasttrain.route;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import org.junit.jupiter.api.Test;
 
 class RouteGeometryTest {
@@ -22,6 +23,19 @@ class RouteGeometryTest {
         assertEquals(1, RouteGeometry.missionSegment(0));
         assertEquals(8, RouteGeometry.missionSegment(7));
         assertEquals(57, RouteGeometry.missionCenterOffset(0));
+    }
+
+    @Test
+    void missionPlacementClampsToLastGeneratableSegmentWithoutOverflow() {
+        int lastSegment = CampaignSavedData.MAX_ROUTE_SEGMENT;
+        int lastCenter = RouteGeometry.segmentStartOffset(lastSegment)
+                + RouteGeometry.SEGMENT_LENGTH / 2;
+
+        assertEquals(lastSegment, RouteGeometry.missionSegment(lastSegment - 1));
+        assertEquals(lastSegment, RouteGeometry.missionSegment(lastSegment));
+        assertEquals(lastSegment, RouteGeometry.missionSegment(Integer.MAX_VALUE));
+        assertEquals(lastCenter, RouteGeometry.missionCenterOffset(lastSegment));
+        assertEquals(lastCenter, RouteGeometry.missionCenterOffset(Integer.MAX_VALUE));
     }
 
     @Test

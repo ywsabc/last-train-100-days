@@ -1,5 +1,7 @@
 package dev.ywsabc.lasttrain.route;
 
+import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+
 /**
  * Deterministic geometry for the campaign's guaranteed eastbound corridor.
  *
@@ -36,7 +38,13 @@ public final class RouteGeometry {
     }
 
     public static int missionSegment(int currentRouteSegment) {
-        return Math.max(1, Math.addExact(currentRouteSegment, 1));
+        if (currentRouteSegment < 1) {
+            return 1;
+        }
+        if (currentRouteSegment >= CampaignSavedData.MAX_ROUTE_SEGMENT) {
+            return CampaignSavedData.MAX_ROUTE_SEGMENT;
+        }
+        return currentRouteSegment + 1;
     }
 
     public static int missionCenterOffset(int currentRouteSegment) {
