@@ -3,12 +3,15 @@ package dev.ywsabc.lasttrain;
 import com.mojang.logging.LogUtils;
 import dev.ywsabc.lasttrain.command.LastTrainCommands;
 import dev.ywsabc.lasttrain.integration.TaczGunfireBridge;
+import dev.ywsabc.lasttrain.mission.MissionEvents;
 import dev.ywsabc.lasttrain.server.CampaignEvents;
 import dev.ywsabc.lasttrain.server.PlayerEvents;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import org.slf4j.Logger;
 
 /**
@@ -28,6 +31,12 @@ public final class LastTrain {
         NeoForge.EVENT_BUS.addListener(CampaignEvents::onServerStarted);
         NeoForge.EVENT_BUS.addListener(CampaignEvents::onServerTick);
         NeoForge.EVENT_BUS.addListener(PlayerEvents::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(
+                EventPriority.LOWEST,
+                false,
+                LivingDeathEvent.class,
+                MissionEvents::onLivingDeath);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onEntityJoin);
         TaczGunfireBridge.install(NeoForge.EVENT_BUS);
         LOGGER.info("Last Train campaign core is loading");
     }

@@ -5,7 +5,6 @@ import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteTrackStates;
-import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -34,6 +33,8 @@ public final class MissionWorldDirector {
     private static final int UPDATE_ALL = 3;
     private static final int TICK_INTERVAL = 10;
     private static final String MISSION_ENTITY_TAG_PREFIX = "lasttrain_mission_";
+    private static final String SUPPLY_MISSION_ID_KEY = "lasttrain_supply_mission_id";
+    private static final String SUPPLY_INDEX_KEY = "lasttrain_supply_index";
 
     private MissionWorldDirector() {
     }
@@ -131,7 +132,7 @@ public final class MissionWorldDirector {
             case STATION_POWER -> observePoweredLevers(level, mission);
             case STATION_GATE -> observeOpenDoors(level, mission);
             case SUPPLY_RECOVERY -> observeRecoveredBarrels(level, mission);
-            case ZOMBIE_BLOCKADE -> observeDefeatedZombies(level, mission);
+            case ZOMBIE_BLOCKADE -> mission.progress();
         };
     }
 
@@ -240,6 +241,10 @@ public final class MissionWorldDirector {
             }
             barrel.clearContent();
             barrel.setItem(0, new ItemStack(supplies[index], counts[index]));
+            blockEntity.getPersistentData().putString(
+                    SUPPLY_MISSION_ID_KEY,
+                    mission.id().toString());
+            blockEntity.getPersistentData().putInt(SUPPLY_INDEX_KEY, index);
             blockEntity.setChanged();
         }
         return true;
@@ -316,21 +321,16 @@ public final class MissionWorldDirector {
         for (int index = 0; index < 5; index++) {
             BlockEntity blockEntity =
                     level.getBlockEntity(mission.site().offset(index - 2, 0, 4));
-            if (!(blockEntity instanceof Container barrel) || barrel.isEmpty()) {
+            if (blockEntity instanceof Container barrel
+                    && level.getBlockState(mission.site().offset(index - 2, 0, 4)).is(Blocks.BARREL)
+                    && mission.id().toString().equals(
+                            blockEntity.getPersistentData().getString(SUPPLY_MISSION_ID_KEY))
+                    && blockEntity.getPersistentData().getInt(SUPPLY_INDEX_KEY) == index
+                    && barrel.isEmpty()) {
                 recovered++;
             }
         }
         return recovered;
-    }
-
-    private static int observeDefeatedZombies(ServerLevel level, ActiveMission mission) {
-        String tag = missionEntityTag(mission);
-        AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
-        List<Zombie> remaining = level.getEntitiesOfClass(
-                Zombie.class,
-                bounds,
-                zombie -> zombie.isAlive() && zombie.getTags().contains(tag));
-        return mission.target() - remaining.size();
     }
 
     public static boolean clearMissionWorld(ServerLevel level, ActiveMission mission) {
@@ -360,12 +360,11 @@ public final class MissionWorldDirector {
             case STATION_POWER, STATION_GATE -> resolveRouteBarrier(level, mission);
             case ZOMBIE_BLOCKADE -> {
                 String tag = missionEntityTag(mission);
-                AABB bounds = new AABB(mission.site()).inflate(48.0D, 16.0D, 48.0D);
-                level.getEntitiesOfClass(
-                                Zombie.class,
-                                bounds,
-                                zombie -> zombie.getTags().contains(tag))
-                        .forEach(Zombie::discard);
+                for (net.minecraft.world.entity.Entity entity : level.getAllEntities()) {
+                    if (entity instanceof Zombie zombie && zombie.getTags().contains(tag)) {
+                        zombie.discard();
+                    }
+                }
             }
             case SUPPLY_RECOVERY -> {
                 // Recovered supply barrels remain as ordinary station loot.
@@ -428,8 +427,12 @@ public final class MissionWorldDirector {
         return false;
     }
 
-    private static String missionEntityTag(ActiveMission mission) {
+    static String missionEntityTag(ActiveMission mission) {
         return MISSION_ENTITY_TAG_PREFIX + mission.id();
+    }
+
+    static boolean isMissionEntityTag(String tag) {
+        return tag.startsWith(MISSION_ENTITY_TAG_PREFIX);
     }
 
     private static Block registeredBlock(String id) {
