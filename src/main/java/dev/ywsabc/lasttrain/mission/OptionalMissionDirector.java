@@ -101,6 +101,12 @@ public final class OptionalMissionDirector {
     }
 
     private static boolean prepare(ServerLevel level, ActiveMission mission) {
+        if (!MissionWorldDirector.worldPreparationAllowed()) {
+            LastTrain.LOGGER.warn(
+                    "Fault injected: optional mission world preparation failed for {}",
+                    mission.id());
+            return false;
+        }
         try {
             return switch (mission.type()) {
                 case SALVAGE_CAR -> prepareSalvageCar(level, mission);

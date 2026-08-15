@@ -9,6 +9,7 @@ import dev.ywsabc.lasttrain.mission.OptionalMissionPolicy;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
+import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -56,6 +57,15 @@ public final class CampaignSavedData extends SavedData {
     private int day = 1;
     private int activeTicksIntoDay;
     private long totalActiveTicks;
+    /**
+     * Active ticks per campaign day. Memory-only — never persisted — and only
+     * changed by the explicit test-only fast-forward opt-in
+     * ({@link FastForwardMode}). A reload always returns to
+     * {@link #DEFAULT_ACTIVE_TICKS_PER_DAY}; the production server tick loop
+     * never writes this field.
+     */
+    private int activeTicksPerDay = DEFAULT_ACTIVE_TICKS_PER_DAY;
+    private boolean fastForwardEnabled;
     private int routeSegment;
     private int generatedRouteSegment;
     private int threat;
@@ -273,6 +283,11 @@ public final class CampaignSavedData extends SavedData {
         }
         ListTag missions = tag.getList("optional_missions", Tag.TAG_COMPOUND);
         for (int index = 0; index < missions.size(); index++) {
+            if (FaultInjection.shouldFail(FaultInjection.FailurePoint.SAVE_LOAD_CORRUPT_ENTRY)) {
+                // Injected corruption: the entry is dropped exactly like a
+                // malformed record, so a faulty save can never stop loading.
+                continue;
+            }
             if (data.optionalMissions.size() >= MAX_OPTIONAL_MISSIONS_ON_LOAD) {
                 LastTrain.LOGGER.warn(
                         "Optional mission list exceeded the load cap of {}; "
@@ -349,6 +364,10 @@ public final class CampaignSavedData extends SavedData {
     private static void loadRewardReceipts(CompoundTag tag, CampaignSavedData data) {
         ListTag receipts = tag.getList("reward_receipts", Tag.TAG_COMPOUND);
         for (int index = 0; index < receipts.size(); index++) {
+            if (FaultInjection.shouldFail(FaultInjection.FailurePoint.SAVE_LOAD_CORRUPT_ENTRY)) {
+                // Injected corruption: dropped like a malformed receipt.
+                continue;
+            }
             RewardReceipt receipt = RewardReceipt.load(receipts.getCompound(index));
             if (receipt != null) {
                 data.putRewardReceipt(receipt);
@@ -589,7 +608,7 @@ public final class CampaignSavedData extends SavedData {
             setDirty();
         }
 
-        if (activeTicksIntoDay >= DEFAULT_ACTIVE_TICKS_PER_DAY
+        if (activeTicksIntoDay >= activeTicksPerDay
                 || !PursuitPolicy.shouldTriggerSiege(
                         mode,
                         status,
@@ -686,13 +705,13 @@ public final class CampaignSavedData extends SavedData {
             setDirty();
         }
         TickOutcome pressureOutcome = updatePursuitPressure();
-        if (activeTicksIntoDay < DEFAULT_ACTIVE_TICKS_PER_DAY) {
+        if (activeTicksIntoDay < activeTicksPerDay) {
             return pressureOutcome != TickOutcome.NONE
                     ? pressureOutcome
                     : TickOutcome.NONE;
         }
 
-        activeTicksIntoDay -= DEFAULT_ACTIVE_TICKS_PER_DAY;
+        activeTicksIntoDay -= activeTicksPerDay;
         if (mode != CampaignMode.ENDLESS && day >= FINAL_DAY) {
             finalDayElapsed = true;
             activeTicksIntoDay = 0;
@@ -736,6 +755,79 @@ public final class CampaignSavedData extends SavedData {
             tryGenerateDailyMission();
         }
         setDirty();
+    }
+
+    // ------------------------------------------------------------------
+    // Test-only accelerated clock. These entries are memory-only, gated
+    // behind an explicit opt-in and never called by the production server
+    // tick loop; see FastForwardMode for the supported entry points and the
+    // equivalence contract with tick-by-tick progression.
+    // ------------------------------------------------------------------
+
+    int activeTicksPerDay() {
+        return activeTicksPerDay;
+    }
+
+    boolean fastForwardEnabled() {
+        return fastForwardEnabled;
+    }
+
+    void enableFastForward(int ticksPerDay) {
+        if (ticksPerDay < FastForwardMode.MIN_TICKS_PER_DAY) {
+            throw new IllegalArgumentException(
+                    "Fast-forward day length must be >= "
+                            + FastForwardMode.MIN_TICKS_PER_DAY
+                            + " active ticks: "
+                            + ticksPerDay);
+        }
+        activeTicksPerDay = ticksPerDay;
+        fastForwardEnabled = true;
+    }
+
+    void disableFastForward() {
+        activeTicksPerDay = DEFAULT_ACTIVE_TICKS_PER_DAY;
+        fastForwardEnabled = false;
+    }
+
+    private void requireFastForwardEnabled() {
+        if (!fastForwardEnabled) {
+            throw new IllegalStateException(
+                    "Fast-forward mode is disabled. It is a test-only entry "
+                            + "point: enable it explicitly via "
+                            + "FastForwardMode.enable(data, ticksPerDay) first; "
+                            + "the production server never calls it.");
+        }
+    }
+
+    /**
+     * Test-only batch clock: runs {@code ticks} ordinary {@link #tick()}s
+     * back to back on the logical server thread. Requires the explicit
+     * fast-forward opt-in; with it disabled this entry throws.
+     */
+    FastForwardMode.AdvanceSummary advanceActiveTicks(long ticks) {
+        requireFastForwardEnabled();
+        int startDay = day;
+        long processed = 0L;
+        TickOutcome lastOutcome = TickOutcome.NONE;
+        while (processed < ticks) {
+            lastOutcome = tick();
+            processed++;
+        }
+        return new FastForwardMode.AdvanceSummary(
+                processed,
+                (long) day - startDay,
+                day,
+                lastOutcome);
+    }
+
+    /**
+     * Test-only equivalent of "all ticks of one day executed in order":
+     * exactly {@link #activeTicksPerDay()} ticks. Equivalence with an
+     * explicit tick-by-tick loop is enforced by FastForwardModeTest.
+     */
+    FastForwardMode.AdvanceSummary simulateDay() {
+        requireFastForwardEnabled();
+        return advanceActiveTicks(activeTicksPerDay);
     }
 
     public boolean advanceRoute(int amount) {
@@ -1123,6 +1215,12 @@ public final class CampaignSavedData extends SavedData {
 
     /** Marks the outbox receipt claimed and settles the mission record. */
     public boolean markRewardClaimed(UUID id) {
+        if (FaultInjection.shouldFail(FaultInjection.FailurePoint.REWARD_PERSIST)) {
+            // Injected crash between the durable PENDING write and the
+            // CLAIMED flip: the receipt hangs PENDING and the outbox retries
+            // the same entry on its next dispatch tick.
+            return false;
+        }
         RewardReceipt receipt = rewardReceipts.get(id);
         if (receipt == null) {
             return false;
@@ -1155,6 +1253,12 @@ public final class CampaignSavedData extends SavedData {
      * chunk access — so timeouts settle even while the site is unloaded.
      */
     public int settleOptionalTimeouts() {
+        if (FaultInjection.shouldFail(
+                FaultInjection.FailurePoint.MISSION_SETTLE_CHUNK_UNLOADED)) {
+            // Injected as if the site chunks were still unloaded: settlement
+            // defers to a later tick and strands no state.
+            return 0;
+        }
         long now = totalActiveTicks;
         int settled = 0;
         for (ActiveMission mission : List.copyOf(optionalMissions)) {
@@ -1617,8 +1721,14 @@ public final class CampaignSavedData extends SavedData {
             boolean trainMoving,
             boolean playerInDangerCollision,
             int activePlayers) {
+        // An injected backend defect is fed in as "vehicle stack not loaded",
+        // so the ordinary TrainRecoveryPolicy path parks the campaign in
+        // SAFE_MODE instead of mutating the world without a backend.
+        boolean stackLoaded = !FaultInjection.shouldFail(
+                FaultInjection.FailurePoint.VEHICLE_STACK_UNAVAILABLE)
+                && vehicleStackLoaded;
         TrainRecoveryPolicy.TrainSituation situation = new TrainRecoveryPolicy.TrainSituation(
-                vehicleStackLoaded,
+                stackLoaded,
                 trainReferenceKnown,
                 trainLocatable,
                 trainMoving,

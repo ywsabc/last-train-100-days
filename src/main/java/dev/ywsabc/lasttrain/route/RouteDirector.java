@@ -6,6 +6,7 @@ import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.integration.TongDaTrackBridge;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
+import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -169,11 +170,27 @@ public final class RouteDirector {
                 blockingCheckpoint(data.activeMission()));
     }
 
+    /**
+     * Pure fault-injection gate consulted before the world-bound segment
+     * generator touches any block. False means "this materialization attempt
+     * failed": the segment is not committed and the next director tick
+     * retries the same segment.
+     */
+    static boolean segmentGenerationAllowed() {
+        return !FaultInjection.shouldFail(FaultInjection.FailurePoint.ROUTE_SEGMENT_GENERATION);
+    }
+
     private static boolean generateSegment(
             ServerLevel level,
             CampaignSavedData data,
             Block trackBlock,
             int segment) {
+        if (!segmentGenerationAllowed()) {
+            LastTrain.LOGGER.warn(
+                    "Fault injected: route segment {} generation failed",
+                    segment);
+            return false;
+        }
         BlockPos station = data.starterStationAnchor();
         int startOffset = RouteGeometry.segmentStartOffset(segment);
         int endOffset = RouteGeometry.segmentEndOffset(segment);

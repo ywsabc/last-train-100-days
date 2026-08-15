@@ -14,7 +14,11 @@ import java.util.Objects;
  * anything still pending on day 100 is settled there.</p>
  */
 public final class OptionalMissionPolicy {
-    /** One campaign day in active ticks; mirrors the campaign day length. */
+    /**
+     * One campaign day in active ticks; the production day length. Optional
+     * grace periods stay absolute-tick values even while the test-only
+     * fast-forward mode shortens the in-memory campaign day.
+     */
     public static final long TICKS_PER_DAY = 24_000L;
     public static final int RESCUE_GRACE_DAYS = 3;
     public static final int SALVAGE_GRACE_DAYS = 7;

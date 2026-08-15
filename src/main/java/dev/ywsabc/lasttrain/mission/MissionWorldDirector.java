@@ -5,6 +5,7 @@ import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteTrackStates;
+import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -186,7 +187,23 @@ public final class MissionWorldDirector {
         }
     }
 
+    /**
+     * Pure fault-injection gate both world directors consult before
+     * materializing a mission site. False means "the generation attempt
+     * failed"; the director simply leaves the mission unprepared and retries
+     * on a later tick, with the fallback deadline as the long-stop.
+     */
+    static boolean worldPreparationAllowed() {
+        return !FaultInjection.shouldFail(FaultInjection.FailurePoint.MISSION_WORLD_PREPARE);
+    }
+
     private static boolean prepare(ServerLevel level, ActiveMission mission) {
+        if (!worldPreparationAllowed()) {
+            LastTrain.LOGGER.warn(
+                    "Fault injected: mission world preparation failed for {}",
+                    mission.id());
+            return false;
+        }
         try {
             buildMissionApron(level, mission);
             return switch (mission.type()) {

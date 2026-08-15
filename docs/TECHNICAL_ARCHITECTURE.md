@@ -840,6 +840,22 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 
 建议加入“加速百日”测试模式，只改变测试环境中的日长，跑完整条主线状态机。
 
+已实现（P7）：
+
+- `FastForwardMode`：显式 opt-in 的测试专用加速时钟。日长缩放只存内存、
+  不持久化，重载必然回到生产日长；`enable/disable`、`advanceActiveTicks(long)`
+  与 `simulateDay()`（一天内全部 tick 依次执行）未 opt-in 时抛异常，生产
+  服务器 tick 循环不调用任何入口；`simulateDay()` 与逐 tick 推进的等价性由
+  测试保证。
+- `FaultInjection`：可注入故障开关（`FailurePoint` × failCount/always），
+  覆盖任务场地生成失败、存档损坏条目、区块卸载中的任务结算、奖励落盘
+  PENDING 悬挂、路线区段生成失败、载具栈缺失（SAFE_MODE）。默认全关，
+  未注册时热路径为单次 volatile 读；注入后一律走既有降级路径（SAFE_MODE、
+  任务 fallback、奖励 outbox 重试），解除注入立即恢复。
+- 100 天全流程状态机冒烟测试：NOT_STARTED → COMPLETED（终局双门）→
+  ENDLESS 继续生成，全程仅策略层/保存数据层断言 day/路线单调、threat 有界、
+  任务槽互斥。
+
 ## 18. MVP 开发阶段
 
 ### 阶段 0：依赖与 API 探针
