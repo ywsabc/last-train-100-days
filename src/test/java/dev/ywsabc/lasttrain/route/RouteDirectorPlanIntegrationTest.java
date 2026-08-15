@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
 
@@ -56,11 +57,50 @@ class RouteDirectorPlanIntegrationTest {
         CampaignSavedData cityData = started();
         cityData.commitRoutePlans(List.of(straight(1), city));
         RouteSegmentLayout cityLayout = RouteDirector.layoutFor(cityData, 2);
-        assertTrue(cityLayout.hasBranchSpur());
+        assertEquals(1, cityLayout.branchTrackSections().size());
 
         CampaignSavedData straightData = started();
         straightData.commitRoutePlans(List.of(straight(1), straight(2)));
-        assertFalse(RouteDirector.layoutFor(straightData, 2).hasBranchSpur());
+        assertEquals(0, RouteDirector.layoutFor(straightData, 2).branchTrackSections().size());
+    }
+
+    @Test
+    void cityBypassSegmentsAppendTheirBranchRunsAfterTheMainLine() {
+        RouteSegmentPlan city = plan(
+                2,
+                SegmentTemplate.CITY_BYPASS,
+                List.of(new RoutePoi(RoutePoiType.CITY, 24)),
+                List.of(
+                        new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH),
+                        new RouteExit(RouteExitKind.BRANCH, 24)));
+        CampaignSavedData cityData = started();
+        cityData.commitRoutePlans(List.of(straight(1), city));
+        RouteSegmentLayout cityLayout = RouteDirector.layoutFor(cityData, 2);
+
+        // The ordered submission sequence: the main line first, then the
+        // branch track runs — never the other way around.
+        List<RouteDirector.TrackRun> runs = RouteDirector.trackRuns(cityLayout);
+        assertEquals(2, runs.size());
+        RouteDirector.TrackRun mainline = runs.get(0);
+        assertEquals(RouteDirector.TrackRunKind.MAIN_LINE, mainline.kind());
+        assertEquals(cityLayout.trackStart(), mainline.start());
+        assertEquals(cityLayout.mainlineDirection(), mainline.direction());
+        assertEquals(RouteGeometry.SEGMENT_LENGTH, mainline.length());
+
+        RouteDirector.TrackRun branch = runs.get(1);
+        assertEquals(RouteDirector.TrackRunKind.BRANCH, branch.kind());
+        assertEquals(cityLayout.branchTrackSections().get(0).start(), branch.start());
+        assertEquals(cityLayout.branchTrackSections().get(0).direction(), branch.direction());
+        assertEquals(cityLayout.branchTrackSections().get(0).length(), branch.length());
+
+        // A plain straight plan submits exactly one run: the main line.
+        CampaignSavedData straightData = started();
+        straightData.commitRoutePlans(List.of(straight(1), straight(2)));
+        List<RouteDirector.TrackRun> straightRuns =
+                RouteDirector.trackRuns(RouteDirector.layoutFor(straightData, 2));
+        assertEquals(1, straightRuns.size());
+        assertEquals(RouteDirector.TrackRunKind.MAIN_LINE, straightRuns.get(0).kind());
+        assertEquals(Direction.EAST, straightRuns.get(0).direction());
     }
 
     @Test
@@ -77,6 +117,12 @@ class RouteDirectorPlanIntegrationTest {
         assertEquals(
                 RouteDirector.layoutFor(data, 12).plan(),
                 RouteDirector.layoutFor(reloaded, 12).plan());
+        // The full physical shape data — mainline steps, turn points, branch
+        // runs — is identical after the restart with the same seed.
+        assertEquals(before, RouteDirector.layoutFor(reloaded, 5));
+        assertEquals(
+                RouteDirector.trackRuns(before),
+                RouteDirector.trackRuns(RouteDirector.layoutFor(reloaded, 5)));
     }
 
     @Test

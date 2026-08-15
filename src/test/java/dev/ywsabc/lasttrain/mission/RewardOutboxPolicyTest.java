@@ -34,20 +34,106 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
-    void crashBetweenWorldWriteAndClaimDeliversExactlyOnce() {
+    void crashBetweenWorldWriteAndClaimClaimsWithoutReGranting() {
         UUID missionId = UUID.randomUUID();
         FakeCrate crate = new FakeCrate();
         List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
         String operationId = RewardOutboxPolicy.operationId(missionId);
 
-        // Simulate: grant ran (marker in world), crash before CLAIMED save.
+        // Simulate: grant ran (marker + items in the world), crash before the
+        // CLAIMED save. The marker persisted, so the reload reconciles to
+        // CLAIM_ONLY — the receipt flips without any second crate fill.
         assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
         int filledSlots = crate.contents().size();
+        crate.addCalls = 0;
 
-        // Reload world state; receipt is still PENDING; dispatcher reconciles.
-        assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
+        assertEquals(
+                GrantDecision.CLAIM_ONLY,
+                RewardOutboxPolicy.reconcile(ReceiptState.PENDING, true));
+        assertTrue(RewardOutboxPolicy.settle(
+                GrantDecision.CLAIM_ONLY, crate, operationId, payload));
+        assertEquals(0, crate.addCalls, "CLAIM_ONLY must never touch the crate");
         assertEquals(filledSlots, crate.contents().size());
         assertTrue(RewardOutboxPolicy.containsPayload(crate.contents(), payload));
+    }
+
+    @Test
+    void claimOnlyNeverRestocksALootedCrate() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+
+        // Marker persisted + CLAIMED save failed + the player took every
+        // item: the reconcile must not misread the looted crate as a lost
+        // chunk and re-grant.
+        assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
+        crate.slots.clear();
+
+        assertTrue(RewardOutboxPolicy.settle(
+                GrantDecision.CLAIM_ONLY, crate, operationId, payload));
+        assertTrue(crate.contents().isEmpty());
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(
+                        ReceiptState.CLAIMED,
+                        crate.operationIds().contains(operationId)));
+        assertTrue(crate.contents().isEmpty());
+    }
+
+    @Test
+    void partialWriteRetryAddsOnlyThePerKindShortfall() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+
+        // Crash mid-fill: bread complete, potatoes only 5 of 8, the remaining
+        // kinds never reached the crate; no marker was written yet.
+        crate.addStack(payload.get(0));
+        crate.addStack(RewardItem.item("minecraft:baked_potato", 5));
+        assertFalse(crate.operationIds().contains(operationId));
+        crate.addedStacks.clear();
+
+        assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
+        assertTrue(RewardOutboxPolicy.containsPayload(crate.contents(), payload));
+        assertEquals(8, RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:bread", 1)));
+        assertEquals(8, RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:baked_potato", 1)));
+        assertEquals(16, RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:arrow", 1)));
+        assertEquals(8, RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:charcoal", 1)));
+        assertEquals(4, RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:iron_ingot", 1)));
+        // The retry requested exactly the per-kind shortfall, never the full
+        // payload stack again.
+        assertEquals(
+                List.of(
+                        RewardItem.item("minecraft:baked_potato", 3),
+                        RewardItem.item("minecraft:arrow", 16),
+                        RewardItem.item("minecraft:charcoal", 8),
+                        RewardItem.item("minecraft:iron_ingot", 4)),
+                crate.addedStacks);
+    }
+
+    @Test
+    void crateAlreadyHoldingThePayloadIsNeverClaimedWithoutNetAddition() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+        // The crate happens to hold every payload kind (for example
+        // player-deposited items), but the grant itself never ran: no marker.
+        payload.forEach(crate::addStack);
+        crate.addCalls = 0;
+        crate.addedStacks.clear();
+
+        // Zero net addition → no marker, no claim: the receipt stays PENDING
+        // and the dispatcher retries until it can actually add something.
+        assertFalse(RewardOutboxPolicy.settle(
+                GrantDecision.GRANT_AND_CLAIM, crate, operationId, payload));
+        assertEquals(0, crate.addCalls);
+        assertTrue(crate.operationIds().isEmpty());
+        assertEquals(
+                GrantDecision.GRANT_AND_CLAIM,
+                RewardOutboxPolicy.reconcile(ReceiptState.PENDING, false));
     }
 
     @Test
@@ -188,9 +274,10 @@ class RewardOutboxPolicyTest {
                     assertTrue(RewardOutboxPolicy.fillCrate(crate, marker, payload));
                 }
             }
-            // Exact payload counts: no doubling from marker overwrites. The
-            // shared crate legitimately merges the 4+4 iron ingots of the two
-            // payloads, so seven slots hold exactly one payload of each kind.
+            // Exact payload counts: no doubling from marker overwrites or
+            // partial-fill retries. The salvage payload's iron shortfall is
+            // already satisfied by the rescue grant's four ingots, so the
+            // shared crate holds one payload of each kind: iron stays 4.
             assertEquals(
                     8,
                     RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:bread", 8)));
@@ -198,7 +285,7 @@ class RewardOutboxPolicyTest {
                     1,
                     RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.credential(second)));
             assertEquals(
-                    8,
+                    4,
                     RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:iron_ingot", 4)));
             assertEquals(
                     8,
@@ -346,8 +433,10 @@ class RewardOutboxPolicyTest {
     private static final class FakeCrate implements CrateAccess {
         private final List<RewardItem> slots = new ArrayList<>();
         private final List<String> markers = new ArrayList<>();
+        private final List<RewardItem> addedStacks = new ArrayList<>();
         private boolean refuseAdds;
         private boolean marked;
+        private int addCalls;
 
         @Override
         public List<RewardItem> contents() {
@@ -355,26 +444,35 @@ class RewardOutboxPolicyTest {
         }
 
         @Override
-        public void addStack(RewardItem stack) {
+        public int addStack(RewardItem stack) {
+            addCalls++;
+            addedStacks.add(stack);
             if (refuseAdds) {
-                return;
+                return 0;
             }
-            for (int index = 0; index < slots.size(); index++) {
+            int remaining = stack.count();
+            for (int index = 0; index < slots.size() && remaining > 0; index++) {
                 RewardItem existing = slots.get(index);
                 boolean sameKind = stack.credentialMissionId().isPresent()
                         ? stack.credentialMissionId().equals(existing.credentialMissionId())
                         : stack.itemId().equals(existing.itemId());
-                if (sameKind && existing.count() + stack.count() <= 64) {
+                if (sameKind && existing.count() < 64) {
+                    int merged = Math.min(64 - existing.count(), remaining);
                     slots.set(
                             index,
                             new RewardItem(
                                     existing.itemId(),
-                                    existing.count() + stack.count(),
+                                    existing.count() + merged,
                                     existing.credentialMissionId()));
-                    return;
+                    remaining -= merged;
                 }
             }
-            slots.add(stack);
+            while (remaining > 0) {
+                int placed = Math.min(64, remaining);
+                slots.add(new RewardItem(stack.itemId(), placed, stack.credentialMissionId()));
+                remaining -= placed;
+            }
+            return stack.count() - remaining;
         }
 
         @Override

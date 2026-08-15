@@ -376,22 +376,28 @@ public final class OptionalMissionDirector {
             if (decision == RewardOutboxPolicy.GrantDecision.NO_OP) {
                 continue;
             }
-            if (!level.hasChunkAt(cratePos)) {
+            // Only the grant path needs the crate: CLAIM_ONLY settles the
+            // receipt without any crate access, so a looted crate can never
+            // trigger a re-grant.
+            if (decision == RewardOutboxPolicy.GrantDecision.GRANT_AND_CLAIM
+                    && !level.hasChunkAt(cratePos)) {
                 continue;
             }
-            ChestBlockEntity chest = ensureRewardCrate(level, cratePos);
-            if (chest == null) {
+            ChestBlockEntity chest = decision == RewardOutboxPolicy.GrantDecision.GRANT_AND_CLAIM
+                    ? ensureRewardCrate(level, cratePos)
+                    : null;
+            if (decision == RewardOutboxPolicy.GrantDecision.GRANT_AND_CLAIM && chest == null) {
                 continue;
             }
-            RewardOutboxPolicy.CrateAccess access = new ChestCrateAccess(chest);
-            boolean complete = RewardOutboxPolicy.fillCrate(
-                    access,
-                    operationId,
-                    RewardOutboxPolicy.payload(receipt.type(), receipt.missionId()));
-            if (complete && data.markRewardClaimed(receipt.missionId())) {
-                level.getServer().getPlayerList().broadcastSystemMessage(
-                        Component.translatable("message.lasttrain.optional_reward_delivered"),
-                        false);
+            RewardOutboxPolicy.CrateAccess access =
+                    chest == null ? null : new ChestCrateAccess(chest);
+            if (RewardOutboxPolicy.settle(
+                            decision,
+                            access,
+                            operationId,
+                            RewardOutboxPolicy.payload(receipt.type(), receipt.missionId()))
+                    && data.markRewardClaimed(receipt.missionId())) {
+                broadcastRewardDelivered(level);
             }
         }
         if (level.hasChunkAt(cratePos)) {
@@ -400,6 +406,12 @@ public final class OptionalMissionDirector {
                 capCrateMarkers(new ChestCrateAccess(chest), data);
             }
         }
+    }
+
+    private static void broadcastRewardDelivered(ServerLevel level) {
+        level.getServer().getPlayerList().broadcastSystemMessage(
+                Component.translatable("message.lasttrain.optional_reward_delivered"),
+                false);
     }
 
     /** The team supply crate sits near the starter station anchor. */
@@ -510,26 +522,51 @@ public final class OptionalMissionDirector {
         }
 
         @Override
-        public void addStack(RewardOutboxPolicy.RewardItem item) {
+        public int addStack(RewardOutboxPolicy.RewardItem item) {
             net.minecraft.world.item.ItemStack stack = materializeReward(item);
             if (stack == null) {
-                return;
+                return 0;
             }
-            for (int slot = 0; slot < chest.getContainerSize(); slot++) {
+            int remaining = stack.getCount();
+            // Merge into matching stacks first, then fill free slots. The
+            // returned count is what really landed in the crate, so a full
+            // crate reports zero instead of pretending to have delivered.
+            for (int slot = 0; slot < chest.getContainerSize() && remaining > 0; slot++) {
                 net.minecraft.world.item.ItemStack existing = chest.getItem(slot);
                 if (existing.isEmpty()) {
-                    chest.setItem(slot, stack.copy());
-                    return;
+                    continue;
                 }
-                if (net.minecraft.world.item.ItemStack.isSameItemSameComponents(existing, stack)
-                        && existing.getCount() + stack.getCount() <= existing.getMaxStackSize()) {
-                    existing.grow(stack.getCount());
-                    return;
+                if (net.minecraft.world.item.ItemStack.isSameItemSameComponents(existing, stack)) {
+                    int space = existing.getMaxStackSize() - existing.getCount();
+                    if (space > 0) {
+                        int merged = Math.min(space, remaining);
+                        existing.grow(merged);
+                        remaining -= merged;
+                    }
                 }
             }
-            // Crate is full of unrelated content: drop nothing, keep PENDING.
-            LastTrain.LOGGER.warn(
-                    "Optional reward crate is full; the outbox stays pending until space frees up");
+            for (int slot = 0; slot < chest.getContainerSize() && remaining > 0; slot++) {
+                net.minecraft.world.item.ItemStack existing = chest.getItem(slot);
+                if (existing.isEmpty()) {
+                    int placed = Math.min(stack.getMaxStackSize(), remaining);
+                    net.minecraft.world.item.ItemStack copy = stack.copy();
+                    copy.setCount(placed);
+                    chest.setItem(slot, copy);
+                    remaining -= placed;
+                }
+            }
+            int added = stack.getCount() - remaining;
+            if (added < stack.getCount()) {
+                // The crate ran out of space for this kind: keep PENDING so
+                // the next dispatch round retries the remaining shortfall.
+                LastTrain.LOGGER.warn(
+                        "Optional reward crate ran out of space: {} of {} {} placed; "
+                                + "the outbox stays pending until space frees up",
+                        added,
+                        stack.getCount(),
+                        item.itemId());
+            }
+            return added;
         }
 
         @Override

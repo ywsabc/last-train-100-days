@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -22,11 +23,14 @@ import net.neoforged.fml.ModList;
 /**
  * Narrow optional bridge to TongDa Railway 1.1.3's track-spawner API.
  *
- * <p>The bridge queues exactly one 64-block eastbound segment by placing
- * {@code tongdarailway:track_spawner}, creating each instruction through
- * {@code TrackPutInfo.getByDir}, and passing the list to
- * {@code TrackSpawnerBlockEntity.addTrackPutInfo}. TongDa remains responsible
- * for physical placement during its normal server tick near a player.</p>
+ * <p>The bridge queues straight track runs of any horizontal direction and
+ * length by placing {@code tongdarailway:track_spawner}, creating each
+ * instruction through {@code TrackPutInfo.getByDir}, and passing the list to
+ * {@code TrackSpawnerBlockEntity.addTrackPutInfo}. The route director submits
+ * the eastbound 64-block main line through {@link #submitEastboundSegment}
+ * and the plan-derived branch runs (station sidings, city spurs) through
+ * {@link #submitStraightRun}; TongDa remains responsible for physical
+ * placement during its normal server tick near a player.</p>
  *
  * <p>No TongDa type is linked at compile time. A queued submission is reported
  * as {@link SubmissionStatus#QUEUED}, never as completed. Call
@@ -42,7 +46,6 @@ public final class TongDaTrackBridge {
             ResourceLocation.fromNamespaceAndPath("create", "track");
     private static final ResourceLocation FIRED_SPAWNER_LAMP_ID =
             ResourceLocation.fromNamespaceAndPath("create", "rose_quartz_lamp");
-    private static final Vec3 EASTBOUND = new Vec3(1.0D, 0.0D, 0.0D);
     private static final int UPDATE_ALL = 3;
 
     private static final String TRACK_PUT_INFO_CLASS =
@@ -59,7 +62,8 @@ public final class TongDaTrackBridge {
     }
 
     /**
-     * Queues a TongDa spawner for a 64-block line beginning at {@code trackStart}.
+     * Queues a TongDa spawner for a 64-block eastbound line beginning at
+     * {@code trackStart}.
      *
      * <p>The deterministic spawner is four blocks to the positive-Z side of
      * the first track. Its eventual rose-quartz-lamp replacement therefore
@@ -68,14 +72,48 @@ public final class TongDaTrackBridge {
     public static SubmissionResult submitEastboundSegment(
             ServerLevel level,
             BlockPos trackStart) {
+        return submitStraightRun(
+                level,
+                trackStart,
+                Direction.EAST,
+                TongDaTrackPolicy.SEGMENT_LENGTH);
+    }
+
+    /**
+     * Queues a TongDa spawner for a straight track run of {@code length}
+     * blocks beginning at {@code trackStart} and continuing in
+     * {@code direction} (horizontal only). The spawner sits four blocks to
+     * the clockwise side of the first track.
+     *
+     * <p>Straight Create track shapes follow the run axis: XO along the X
+     * axis, ZO along the Z axis. Real block placement remains TongDa's job;
+     * a queued submission is pending work, never completion proof.</p>
+     *
+     * @throws IllegalArgumentException for vertical directions or
+     *     non-positive lengths
+     */
+    public static SubmissionResult submitStraightRun(
+            ServerLevel level,
+            BlockPos trackStart,
+            Direction direction,
+            int length) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(trackStart, "trackStart");
+        Objects.requireNonNull(direction, "direction");
+        if (direction.getAxis() == Direction.Axis.Y) {
+            throw new IllegalArgumentException(
+                    "Track runs must be horizontal, got " + direction);
+        }
+        if (length < 1) {
+            throw new IllegalArgumentException(
+                    "Track runs must be at least one block long, got " + length);
+        }
 
         BlockPos spawnerPos;
         List<BlockPos> trackPositions;
         try {
-            spawnerPos = offset(trackStart, TongDaTrackPolicy.eastboundSpawnerOffset());
-            trackPositions = trackPositions(trackStart);
+            spawnerPos = spawnerPosition(trackStart, direction);
+            trackPositions = runPositions(trackStart, direction, length);
         } catch (ArithmeticException exception) {
             return new SubmissionResult(
                     SubmissionStatus.INVALID_POSITION,
@@ -83,12 +121,12 @@ public final class TongDaTrackBridge {
                     diagnostic(exception));
         }
 
-        SegmentInspection initialInspection = inspectEastboundSegment(level, trackStart);
-        if (initialInspection.actuallyComplete()) {
+        RunInspection initialInspection = inspectRun(level, trackStart, direction, length);
+        if (initialInspection.complete()) {
             return new SubmissionResult(
                     SubmissionStatus.ALREADY_COMPLETE,
                     spawnerPos,
-                    "All 64 Create XO tracks are already present");
+                    "All " + length + " Create tracks are already present");
         }
         if (!ModList.get().isLoaded(TONGDA_MOD_ID)) {
             return new SubmissionResult(
@@ -134,12 +172,13 @@ public final class TongDaTrackBridge {
                     spawnerPos,
                     "Missing block " + CREATE_TRACK_ID);
         }
-        if (initialInspection.conflictingCreateTrackPositions() > 0) {
+        if (initialInspection.conflicting() > 0) {
             return new SubmissionResult(
                     SubmissionStatus.TRACK_SHAPE_CONFLICT,
                     spawnerPos,
-                    initialInspection.conflictingCreateTrackPositions()
-                            + " existing Create track(s) are not XO; TongDa skips existing track blocks");
+                    initialInspection.conflicting()
+                            + " existing Create track(s) do not match the straight shape; "
+                            + "TongDa skips existing track blocks");
         }
 
         if (!withinWritableBounds(level, spawnerPos)
@@ -147,7 +186,7 @@ public final class TongDaTrackBridge {
             return new SubmissionResult(
                     SubmissionStatus.OUTSIDE_WORLD_BOUNDS,
                     spawnerPos,
-                    "The segment or its spawner is outside build/world-border bounds");
+                    "The run or its spawner is outside build/world-border bounds");
         }
 
         BlockState previousState = level.getBlockState(spawnerPos);
@@ -165,14 +204,14 @@ public final class TongDaTrackBridge {
                         "The deterministic TongDa spawner already exists; completion is not yet proven");
             }
             if (retryingFiredSpawner) {
-                if (!TongDaTrackPolicy.shouldRetryAfterFiredSpawner(
-                        initialInspection.state(),
-                        initialInspection.conflictingCreateTrackPositions())) {
+                if (!(initialInspection.loaded() == length
+                        && initialInspection.matching() < length
+                        && initialInspection.conflicting() == 0)) {
                     return new SubmissionResult(
                             SubmissionStatus.RETRY_DEFERRED,
                             spawnerPos,
-                            "TongDa's powered completion lamp is present, but all 64 track "
-                                    + "positions are not loaded yet; retry is deferred");
+                            "TongDa's powered completion lamp is present, but the run is not "
+                                    + "fully loaded or provably incomplete yet; retry is deferred");
                 }
             } else {
                 return new SubmissionResult(
@@ -185,7 +224,7 @@ public final class TongDaTrackBridge {
 
         List<Object> putInfos;
         try {
-            putInfos = api.createEastboundPutInfos(trackPositions);
+            putInfos = api.createPutInfos(trackPositions, direction);
         } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
             return new SubmissionResult(
                     SubmissionStatus.API_INCOMPATIBLE,
@@ -218,8 +257,9 @@ public final class TongDaTrackBridge {
                     SubmissionStatus.QUEUED,
                     spawnerPos,
                     retryingFiredSpawner
-                            ? "Requeued 64 entries after TongDa fired but left an incomplete XO segment"
-                            : "Queued 64 eastbound TrackPutInfo entries; physical placement remains pending");
+                            ? "Requeued " + length + " entries after TongDa fired but left an "
+                                    + "incomplete straight run"
+                            : "Queued " + length + " TrackPutInfo entries; physical placement remains pending");
         } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
             restoreControlPosition(level, spawnerPos, spawnerBlock, previousState);
             return new SubmissionResult(
@@ -278,9 +318,65 @@ public final class TongDaTrackBridge {
     }
 
     private static List<BlockPos> trackPositions(BlockPos start) {
-        return TongDaTrackPolicy.eastboundTrackOffsets().stream()
-                .map(relative -> offset(start, relative))
-                .toList();
+        return runPositions(start, Direction.EAST, TongDaTrackPolicy.SEGMENT_LENGTH);
+    }
+
+    /** Consecutive positions of a straight horizontal run, start first. */
+    private static List<BlockPos> runPositions(BlockPos start, Direction direction, int length) {
+        List<BlockPos> positions = new ArrayList<>(length);
+        BlockPos cursor = start;
+        for (int index = 0; index < length; index++) {
+            positions.add(cursor);
+            cursor = new BlockPos(
+                    Math.addExact(cursor.getX(), direction.getStepX()),
+                    Math.addExact(cursor.getY(), direction.getStepY()),
+                    Math.addExact(cursor.getZ(), direction.getStepZ()));
+        }
+        return List.copyOf(positions);
+    }
+
+    /** The deterministic spawner cell: four blocks clockwise of the first track. */
+    private static BlockPos spawnerPosition(BlockPos start, Direction direction) {
+        Direction lateral = direction.getClockWise();
+        return new BlockPos(
+                Math.addExact(start.getX(), lateral.getStepX() * TongDaTrackPolicy.SPAWNER_LATERAL_OFFSET),
+                Math.addExact(start.getY(), lateral.getStepY() * TongDaTrackPolicy.SPAWNER_LATERAL_OFFSET),
+                Math.addExact(start.getZ(), lateral.getStepZ() * TongDaTrackPolicy.SPAWNER_LATERAL_OFFSET));
+    }
+
+    /** Loaded-chunk observation of one straight run. */
+    private static RunInspection inspectRun(
+            ServerLevel level,
+            BlockPos start,
+            Direction direction,
+            int length) {
+        Block trackBlock = registeredBlock(CREATE_TRACK_ID);
+        String expectedShape = direction.getAxis() == Direction.Axis.X ? "xo" : "zo";
+        int loaded = 0;
+        int matching = 0;
+        int conflicting = 0;
+        for (BlockPos trackPos : runPositions(start, direction, length)) {
+            if (!level.hasChunkAt(trackPos)) {
+                continue;
+            }
+            loaded++;
+            if (trackBlock != Blocks.AIR) {
+                BlockState state = level.getBlockState(trackPos);
+                if (state.is(trackBlock) && hasSerializedProperty(state, "shape", expectedShape)) {
+                    matching++;
+                } else if (state.is(trackBlock)) {
+                    conflicting++;
+                }
+            }
+        }
+        return new RunInspection(
+                loaded == length && matching == length,
+                loaded,
+                matching,
+                conflicting);
+    }
+
+    private record RunInspection(boolean complete, int loaded, int matching, int conflicting) {
     }
 
     private static BlockPos offset(BlockPos start, TongDaTrackPolicy.Offset offset) {
@@ -464,25 +560,32 @@ public final class TongDaTrackBridge {
             return spawnerBlockEntityType.isInstance(blockEntity);
         }
 
-        private List<Object> createEastboundPutInfos(List<BlockPos> positions)
+        private List<Object> createPutInfos(List<BlockPos> positions, Direction direction)
                 throws ReflectiveOperationException {
+            Vec3 vector = new Vec3(
+                    direction.getStepX(),
+                    direction.getStepY(),
+                    direction.getStepZ());
+            String expectedShape = direction.getAxis() == Direction.Axis.X ? "XO" : "ZO";
             List<Object> result = new ArrayList<>(positions.size());
             for (BlockPos position : positions) {
-                Object putInfo = getByDir.invoke(null, position, EASTBOUND, null);
+                Object putInfo = getByDir.invoke(null, position, vector, null);
                 if (putInfo == null || getByDir.getReturnType() != putInfo.getClass()) {
                     throw new ReflectiveOperationException(
                             "TrackPutInfo.getByDir returned an unexpected value");
                 }
                 Object shape = shapeAccessor.invoke(putInfo);
-                if (!(shape instanceof Enum<?> trackShape) || !trackShape.name().equals("XO")) {
+                if (!(shape instanceof Enum<?> trackShape)
+                        || !trackShape.name().equals(expectedShape)) {
                     throw new ReflectiveOperationException(
-                            "TrackPutInfo.getByDir did not produce shape XO");
+                            "TrackPutInfo.getByDir did not produce shape " + expectedShape);
                 }
                 result.add(putInfo);
             }
-            if (result.size() != TongDaTrackPolicy.SEGMENT_LENGTH) {
+            if (result.size() != positions.size()) {
                 throw new ReflectiveOperationException(
-                        "Expected 64 TrackPutInfo entries, got " + result.size());
+                        "Expected " + positions.size() + " TrackPutInfo entries, got "
+                                + result.size());
             }
             return List.copyOf(result);
         }

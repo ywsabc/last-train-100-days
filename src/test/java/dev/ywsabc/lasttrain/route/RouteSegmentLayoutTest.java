@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -48,7 +49,8 @@ class RouteSegmentLayoutTest {
                         0,
                         0),
                 fourth.platformAnchor());
-        assertFalse(fourth.hasBranchSpur());
+        assertEquals(List.of(), fourth.branchTrackSections());
+        assertEquals(List.of(), fourth.turnPoints());
     }
 
     @Test
@@ -64,7 +66,35 @@ class RouteSegmentLayoutTest {
                 STATION.offset(RouteGeometry.segmentStartOffset(3) + anchor, 0, 0),
                 layout.platformAnchor());
         assertEquals(RouteSegmentLayout.STATION_PLATFORM_HALF_LENGTH, layout.platformHalfLength());
-        assertFalse(layout.hasBranchSpur());
+        // The main line runs straight through, and a real platform siding
+        // (side track) accompanies it: the two junction turn points sit at
+        // the siding ends on the main line.
+        RouteSegmentLayout.BranchTrackSection siding = layout.branchTrackSections().get(0);
+        assertEquals(RouteSegmentLayout.BranchTrackKind.STATION_SIDING, siding.kind());
+        assertEquals(Direction.EAST, siding.direction());
+        assertEquals(2 * RouteSegmentLayout.STATION_PLATFORM_HALF_LENGTH + 1, siding.length());
+        assertEquals(
+                STATION.offset(
+                        RouteGeometry.segmentStartOffset(3) + anchor
+                                - RouteSegmentLayout.STATION_PLATFORM_HALF_LENGTH,
+                        1,
+                        RouteSegmentLayout.STATION_SIDING_LATERAL_OFFSET),
+                siding.start());
+        assertEquals(2, layout.turnPoints().size());
+        assertEquals(
+                STATION.offset(
+                        RouteGeometry.segmentStartOffset(3) + anchor
+                                - RouteSegmentLayout.STATION_PLATFORM_HALF_LENGTH,
+                        1,
+                        0),
+                layout.turnPoints().get(0));
+        assertEquals(
+                STATION.offset(
+                        RouteGeometry.segmentStartOffset(3) + anchor
+                                + RouteSegmentLayout.STATION_PLATFORM_HALF_LENGTH,
+                        1,
+                        0),
+                layout.turnPoints().get(1));
     }
 
     @Test
@@ -76,6 +106,8 @@ class RouteSegmentLayoutTest {
                 List.of(new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH)));
         RouteSegmentLayout layout = RouteSegmentLayout.compute(STATION, 5, bridgePlan);
         assertFalse(layout.hasPlatform());
+        assertEquals(List.of(), layout.branchTrackSections());
+        assertEquals(List.of(), layout.turnPoints());
         // 64-block segment, support columns every 4 blocks, two pillar tops each.
         assertEquals(16 * 2, layout.deckSupportTops().size());
         assertEquals(
@@ -93,7 +125,7 @@ class RouteSegmentLayoutTest {
     }
 
     @Test
-    void cityBypassTemplateCarriesABranchSpurAtItsBranchExit() {
+    void cityBypassTemplateDerivesARealCitySpurAtItsBranchExit() {
         int branch = 24;
         RouteSegmentPlan cityPlan = plan(
                 2,
@@ -103,14 +135,69 @@ class RouteSegmentLayoutTest {
                         new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH),
                         new RouteExit(RouteExitKind.BRANCH, branch)));
         RouteSegmentLayout layout = RouteSegmentLayout.compute(STATION, 2, cityPlan);
-        assertTrue(layout.hasBranchSpur());
+        // A real north/south branch track run toward the city interest
+        // point, diverging from the main line at the planned branch exit —
+        // never a stone platform.
+        assertEquals(1, layout.branchTrackSections().size());
+        RouteSegmentLayout.BranchTrackSection spur = layout.branchTrackSections().get(0);
+        assertEquals(RouteSegmentLayout.BranchTrackKind.CITY_SPUR, spur.kind());
+        assertEquals(RouteSegmentLayout.CITY_SPUR_LENGTH, spur.length());
+        assertTrue(
+                spur.direction() == Direction.NORTH || spur.direction() == Direction.SOUTH,
+                "the city spur must head north or south, got " + spur.direction());
         assertEquals(
-                STATION.offset(RouteGeometry.segmentStartOffset(2) + branch, 0, 0),
-                layout.branchSpurAnchor());
+                STATION.offset(RouteGeometry.segmentStartOffset(2) + branch, 1, 0),
+                spur.start());
+        // The junction on the main line is the single turn point.
+        assertEquals(List.of(spur.start()), layout.turnPoints());
     }
 
     @Test
-    void everyLayoutKeepsTheEastboundTrackStartAndBorderProbe() {
+    void citySpurDirectionIsDeterministicPerPlan() {
+        int branch = 24;
+        List<RoutePoi> pois = List.of(new RoutePoi(RoutePoiType.CITY, branch));
+        List<RouteExit> exits = List.of(
+                new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH),
+                new RouteExit(RouteExitKind.BRANCH, branch));
+        RouteSegmentLayout first = RouteSegmentLayout.compute(
+                STATION,
+                2,
+                plan(2, SegmentTemplate.CITY_BYPASS, pois, exits));
+        RouteSegmentLayout sameSeed = RouteSegmentLayout.compute(
+                STATION,
+                2,
+                plan(2, SegmentTemplate.CITY_BYPASS, pois, exits));
+        // Same plan → identical shape data (and restart-identical layouts).
+        assertEquals(first.branchTrackSections(), sameSeed.branchTrackSections());
+        assertEquals(first, sameSeed);
+    }
+
+    @Test
+    void everyLayoutDerivesItsMainlineStepsFromThePlan() {
+        RouteSegmentLayout layout = RouteSegmentLayout.compute(STATION, 7, straight(7));
+        List<RouteSegmentLayout.RouteTrackStep> steps = layout.mainlineSteps();
+        assertEquals(RouteGeometry.SEGMENT_LENGTH, steps.size());
+        assertEquals(
+                new RouteSegmentLayout.RouteTrackStep(
+                        STATION.offset(RouteGeometry.segmentStartOffset(7), 1, 0),
+                        Direction.EAST),
+                steps.getFirst());
+        assertEquals(
+                new RouteSegmentLayout.RouteTrackStep(
+                        STATION.offset(RouteGeometry.segmentEndOffset(7), 1, 0),
+                        Direction.EAST),
+                steps.getLast());
+        for (int index = 0; index < steps.size(); index++) {
+            assertEquals(Direction.EAST, steps.get(index).direction());
+            assertEquals(
+                    STATION.offset(RouteGeometry.segmentStartOffset(7) + index, 1, 0),
+                    steps.get(index).position());
+        }
+        assertEquals(Direction.EAST, layout.mainlineDirection());
+    }
+
+    @Test
+    void everyLayoutKeepsTheTrackStartAndBorderProbe() {
         RouteSegmentLayout layout = RouteSegmentLayout.compute(STATION, 7, straight(7));
         assertEquals(
                 STATION.offset(RouteGeometry.segmentStartOffset(7), 1, 0),

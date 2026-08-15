@@ -7,6 +7,7 @@ import dev.ywsabc.lasttrain.integration.TongDaTrackBridge;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
+import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -26,11 +27,16 @@ import net.neoforged.fml.ModList;
  * only two segments ahead. Every segment is realized from its committed
  * {@link RouteSegmentPlan} (planned and persisted by
  * {@link RouteSegmentPlanner} in the plan → realize two-phase model): the
- * template drives the deck support density, station platforms sit on their
- * planned POI anchors, and city bypasses carry a branch spur at their
- * planned branch exit. TongDa's track spawner owns physical track placement;
- * persistent route progress advances only after all 64 Create tracks are
- * observed with the expected shape.</p>
+ * deck is laid step by step along the layout's plan-derived main-line track
+ * steps instead of a fixed eastbound loop, the template drives the deck
+ * support density, station platforms sit on their planned POI anchors with a
+ * parallel platform siding, and city bypasses derive a real north/south
+ * branch track run at their planned branch exit. The main line is submitted
+ * first, the branch track runs afterwards — the ordered
+ * {@link #trackRuns(RouteSegmentLayout)} sequence — through TongDa's track
+ * spawner, which owns physical track placement; persistent route progress
+ * advances only after all 64 Create tracks are observed with the expected
+ * shape.</p>
  */
 public final class RouteDirector {
     private static final int UPDATE_ALL = 3;
@@ -199,6 +205,62 @@ public final class RouteDirector {
                 data.routePlan(segment));
     }
 
+    /** Role of one ordered track run handed to the track backend. */
+    public enum TrackRunKind {
+        /** The only run that continues the main line. */
+        MAIN_LINE,
+        /** A side run such as a station siding or a city spur. */
+        BRANCH
+    }
+
+    /**
+     * One ordered track run handed to the track backend: start block,
+     * horizontal direction and length.
+     */
+    public record TrackRun(
+            BlockPos start,
+            net.minecraft.core.Direction direction,
+            int length,
+            TrackRunKind kind) {
+        public TrackRun {
+            java.util.Objects.requireNonNull(start, "start");
+            java.util.Objects.requireNonNull(direction, "direction");
+            java.util.Objects.requireNonNull(kind, "kind");
+            if (direction.getAxis() == net.minecraft.core.Direction.Axis.Y) {
+                throw new IllegalArgumentException(
+                        "Track runs must be horizontal, got " + direction);
+            }
+            if (length < 1) {
+                throw new IllegalArgumentException(
+                        "Track runs must be at least one block long, got " + length);
+            }
+        }
+    }
+
+    /**
+     * The ordered submission sequence of one segment: the main line first,
+     * then the branch track runs in layout order. The world generator
+     * submits exactly this sequence, so a branch run can never overtake the
+     * main line it diverges from.
+     */
+    static List<TrackRun> trackRuns(RouteSegmentLayout layout) {
+        java.util.Objects.requireNonNull(layout, "layout");
+        List<TrackRun> runs = new java.util.ArrayList<>();
+        runs.add(new TrackRun(
+                layout.trackStart(),
+                layout.mainlineDirection(),
+                RouteGeometry.SEGMENT_LENGTH,
+                TrackRunKind.MAIN_LINE));
+        for (RouteSegmentLayout.BranchTrackSection section : layout.branchTrackSections()) {
+            runs.add(new TrackRun(
+                    section.start(),
+                    section.direction(),
+                    section.length(),
+                    TrackRunKind.BRANCH));
+        }
+        return List.copyOf(runs);
+    }
+
     private static boolean generateSegment(
             ServerLevel level,
             CampaignSavedData data,
@@ -220,11 +282,10 @@ public final class RouteDirector {
             return false;
         }
 
-        BlockPos station = data.starterStationAnchor();
-        int startOffset = RouteGeometry.segmentStartOffset(segment);
-        int endOffset = RouteGeometry.segmentEndOffset(segment);
-        for (int offset = startOffset; offset <= endOffset; offset++) {
-            BlockPos deckCenter = station.offset(offset, 0, 0);
+        // The deck follows the plan-derived main-line steps instead of a
+        // fixed eastbound loop: position and direction come from the layout.
+        for (RouteSegmentLayout.RouteTrackStep step : layout.mainlineSteps()) {
+            BlockPos deckCenter = step.position().below();
             clearVehicleEnvelope(level, deckCenter, trackBlock);
             for (int z = -1; z <= 1; z++) {
                 level.setBlock(
@@ -242,7 +303,11 @@ public final class RouteDirector {
         if (!inspection.actuallyComplete()) {
             prepareTongDaControlPosition(level, inspection.spawnerPosition());
             TongDaTrackBridge.SubmissionResult submission =
-                    TongDaTrackBridge.submitEastboundSegment(level, layout.trackStart());
+                    TongDaTrackBridge.submitStraightRun(
+                            level,
+                            layout.trackStart(),
+                            layout.mainlineDirection(),
+                            RouteGeometry.SEGMENT_LENGTH);
             reportTongDaStatus(segment, submission);
             return false;
         }
@@ -250,8 +315,17 @@ public final class RouteDirector {
         if (layout.hasPlatform()) {
             buildPlatform(level, layout.platformAnchor(), layout.platformHalfLength());
         }
-        if (layout.hasBranchSpur()) {
-            buildBranchSpur(level, layout.branchSpurAnchor());
+        // Branch track runs are submitted in layout order after the main
+        // line completed; TongDa owns their physical placement.
+        for (RouteSegmentLayout.BranchTrackSection section : layout.branchTrackSections()) {
+            TongDaTrackBridge.SubmissionResult result = TongDaTrackBridge.submitStraightRun(
+                    level, section.start(), section.direction(), section.length());
+            LastTrain.LOGGER.info(
+                    "Submitted {} branch track run of segment {} at {}: {}",
+                    section.kind(),
+                    segment,
+                    section.start(),
+                    result.status());
         }
         return true;
     }
@@ -323,6 +397,10 @@ public final class RouteDirector {
         }
     }
 
+    /**
+     * Places the station platform around the planned anchor: stone brick
+     * slabs to both sides of the main line with lanterns at the corners.
+     */
     private static void buildPlatform(
             ServerLevel level,
             BlockPos anchor,
@@ -346,27 +424,6 @@ public final class RouteDirector {
                         UPDATE_ALL);
             }
         }
-    }
-
-    /**
-     * Places the city branch spur: a short stone apron diverging to the
-     * positive-Z side at the planned branch exit. It is a marker structure,
-     * never a second way forward on the main line; the main-line track
-     * remains the TongDa eastbound corridor.
-     */
-    private static void buildBranchSpur(ServerLevel level, BlockPos anchor) {
-        for (int x = 0; x <= 2; x++) {
-            for (int z = 1; z <= 5; z++) {
-                level.setBlock(
-                        anchor.offset(x, 0, z),
-                        Blocks.STONE_BRICKS.defaultBlockState(),
-                        UPDATE_ALL);
-            }
-        }
-        level.setBlock(
-                anchor.offset(0, 1, 5),
-                Blocks.LANTERN.defaultBlockState(),
-                UPDATE_ALL);
     }
 
     private static Block registeredBlock(String id) {

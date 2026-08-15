@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import net.minecraft.nbt.CompoundTag;
@@ -112,6 +113,50 @@ class CampaignSavedDataTrainRecoveryTest {
         assertEquals(5, data.rescueAnchorSegment());
 
         data.clearMission();
+        assertEquals(8, data.rescueAnchorSegment());
+    }
+
+    @Test
+    void rescueAnchorIgnoresSupportOptionalAndProposedMissions() {
+        // A SUPPORT mission occupies the mainline slot but never blocks the
+        // route: it must not restrict where a rescue may return the train.
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        assertTrue(data.advanceRoute(5));
+        data.clearMission();
+        assertTrue(data.createMission(MissionType.SUPPLY_RECOVERY));
+        assertTrue(data.advanceRoute(3));
+        assertEquals(8, data.routeSegment());
+        assertEquals(8, data.rescueAnchorSegment());
+
+        // An accepted OPTIONAL mission runs beside the main line and must not
+        // restrict the rescue either.
+        assertTrue(data.proposeOptionalMission(MissionType.RESCUE_SURVIVOR));
+        assertEquals(
+                CampaignSavedData.ProposalAnswer.ACCEPTED,
+                data.acceptProposal(null, null));
+        assertEquals(8, data.rescueAnchorSegment());
+
+        // A PROPOSED (not yet accepted) optional offer is not a checkpoint.
+        assertTrue(data.proposeOptionalMission(MissionType.SALVAGE_CAR));
+        assertEquals(8, data.rescueAnchorSegment());
+    }
+
+    @Test
+    void readyMainlineMissionsReleasedTheirRescueCheckpoint() {
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        assertTrue(data.advanceRoute(5));
+        data.clearMission();
+        assertTrue(data.createMission(MissionType.RAIL_BREAK));
+        assertTrue(data.advanceRoute(3));
+        assertEquals(8, data.routeSegment());
+        assertEquals(5, data.rescueAnchorSegment());
+
+        // The barrier is physically resolved: only ACTIVE route-blocking
+        // mainline missions hold the rescue anchor.
+        data.activeMission().setObservedProgress(data.activeMission().target());
+        assertEquals(MissionStage.READY_TO_TURN_IN, data.activeMission().stage());
         assertEquals(8, data.rescueAnchorSegment());
     }
 

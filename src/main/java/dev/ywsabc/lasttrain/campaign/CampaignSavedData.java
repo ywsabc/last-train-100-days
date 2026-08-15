@@ -7,10 +7,14 @@ import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.OptionalMissionPolicy;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
+import dev.ywsabc.lasttrain.route.RouteExit;
+import dev.ywsabc.lasttrain.route.RouteExitKind;
+import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
 import dev.ywsabc.lasttrain.route.RouteSegmentPlan;
 import dev.ywsabc.lasttrain.route.RouteSegmentPlanner;
 import dev.ywsabc.lasttrain.route.RouteTemplateConfig;
+import dev.ywsabc.lasttrain.route.SegmentTemplate;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
@@ -509,6 +513,10 @@ public final class CampaignSavedData extends SavedData {
      * {@link #DEFAULT_ROUTE_PLAN_AHEAD} segments under the campaign's
      * {@link #routeRulesVersion} and the extension is persisted.
      *
+     * <p>A campaign in {@link #legacyLinearRoute()} never engages the
+     * planner: it returns the fixed legacy straight plan for every future
+     * segment and persists no plan state.</p>
+     *
      * @throws IllegalArgumentException when the segment was already realized
      */
     public RouteSegmentPlan routePlan(int segment) {
@@ -519,6 +527,9 @@ public final class CampaignSavedData extends SavedData {
             throw new IllegalArgumentException(
                     "Route segment " + segment + " was already realized and cannot be re-planned");
         }
+        if (legacyLinearRoute()) {
+            return legacyLinearPlan(segment);
+        }
         RouteSegmentPlanner planner = routePlanner();
         int target = Math.min(
                 MAX_ROUTE_SEGMENT,
@@ -528,6 +539,36 @@ public final class CampaignSavedData extends SavedData {
             persistRoutePlanState();
         }
         return planner.plan(segment);
+    }
+
+    /**
+     * True while this campaign keeps the pre-planner legacy linear
+     * production behavior: route rules version 1 with no committed plan state
+     * at all. Future segments stay the fixed 64-block eastbound straight
+     * corridor with the every-fourth-segment waypoint platform, and the
+     * multi-template planner is never engaged. The explicit
+     * {@link #adoptRouteRulesVersion} migration to version 2 exits this mode;
+     * committed version-1 plans always win over the legacy fallback, and
+     * already-realized segments are never touched.
+     */
+    public boolean legacyLinearRoute() {
+        return routeRulesVersion <= 1
+                && routePlans.isEmpty()
+                && routePlanCursor.nextSegment() <= 1;
+    }
+
+    /**
+     * The fixed legacy production plan: a plain eastbound straight corridor
+     * with no interest points. The layout derives the historical
+     * every-fourth-segment waypoint platform from the straight template.
+     */
+    private static RouteSegmentPlan legacyLinearPlan(int segment) {
+        return new RouteSegmentPlan(
+                segment,
+                0L,
+                SegmentTemplate.STRAIGHT,
+                List.of(),
+                List.of(new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH)));
     }
 
     /** Pending (planned, not yet realized) route plans, in segment order. */
@@ -577,7 +618,10 @@ public final class CampaignSavedData extends SavedData {
     /**
      * Explicitly adopts a newer route rules version. Committed pending plans
      * stay; only segments planned afterwards use the new version, so an
-     * existing world never silently re-rolls its committed route.
+     * existing world never silently re-rolls its committed route. Adopting
+     * version 2 also exits the {@link #legacyLinearRoute()} mode: segments
+     * after the migration follow the multi-template planner while the
+     * already-realized segments stay untouched.
      */
     public boolean adoptRouteRulesVersion(int version) {
         if (version < 1 || version == routeRulesVersion) {
@@ -594,8 +638,10 @@ public final class CampaignSavedData extends SavedData {
             return routePlanner;
         }
         if (routePlans.isEmpty() && routePlanCursor.nextSegment() <= 1) {
-            // No committed plan state yet: a fresh campaign or a pre-planner
-            // world whose realized segments are simply not retained.
+            // No committed plan state yet: a fresh campaign. (A pre-planner
+            // legacy world never reaches the planner — routePlan keeps it on
+            // the fixed legacy linear production until the explicit
+            // migration.)
             routePlanner = new RouteSegmentPlanner(
                     campaignSeed,
                     RouteSegmentPlanner.DEFAULT_ROUTE_INDEX,
@@ -2103,14 +2149,20 @@ public final class CampaignSavedData extends SavedData {
     }
 
     /**
-     * The farthest verified segment a rescue may return the train to. An
-     * active mission's segment is a hard checkpoint: rescue is repair, not a
-     * way to skip the blocker.
+     * The farthest verified segment a rescue may return the train to. Only an
+     * ACTIVE route-blocking mainline mission is a hard checkpoint — the same
+     * criterion the route director applies — so SUPPORT, OPTIONAL and
+     * PROPOSED missions never restrict where a rescue may land. Rescue is
+     * repair, not a way to skip the blocker.
      */
     public int rescueAnchorSegment() {
-        return TrainRecoveryPolicy.anchorSegment(
-                routeSegment,
-                activeMission == null ? null : activeMission.routeSegment());
+        ActiveMission mission = activeMission;
+        Integer checkpoint = mission != null
+                && mission.stage() == MissionStage.ACTIVE
+                && mission.type().blocksRoute()
+                ? mission.routeSegment()
+                : null;
+        return TrainRecoveryPolicy.anchorSegment(routeSegment, checkpoint);
     }
 
     private boolean tryGenerateDailyMission() {
