@@ -268,7 +268,9 @@ public final class CampaignSavedData extends SavedData {
      * restored here: a pending vote is persisted for the current SavedData
      * snapshot but is cancelled on restart. Reward receipts over the cap drop
      * oldest {@link RewardOutboxPolicy.ReceiptState#CLAIMED} entries first and
-     * never evict an undelivered PENDING receipt.
+     * never evict an undelivered PENDING receipt; a save with more PENDING
+     * receipts than the cap keeps every receipt and parks a running campaign
+     * in {@link CampaignStatus#SAFE_MODE}.
      */
     private static void loadOptionalState(
             CompoundTag tag,
@@ -374,15 +376,29 @@ public final class CampaignSavedData extends SavedData {
             }
         }
         // Hard deserialization cap: a corrupt save cannot grow the receipt
-        // map without bound. Oldest CLAIMED entries go first; only when a
-        // save has more than 256 undelivered PENDING entries (impossible in
-        // normal play) are excess PENDING entries dropped as a last resort.
+        // map without bound. Eviction only ever drops the oldest CLAIMED
+        // entries; a PENDING receipt is never evicted.
         while (data.rewardReceipts.size() > RewardOutboxPolicy.MAX_RECEIPTS) {
             UUID victim = data.oldestClaimedReceiptId();
             if (victim == null) {
-                victim = data.rewardReceipts.keySet().iterator().next();
+                break;
             }
             data.rewardReceipts.remove(victim);
+        }
+        if (data.rewardReceipts.size() > RewardOutboxPolicy.MAX_RECEIPTS) {
+            // More undelivered PENDING receipts than the cap (impossible in
+            // normal play): keep every receipt instead of silently dropping
+            // rewards, and park a running campaign in SAFE_MODE so the world
+            // side effects pause until the save is inspected.
+            LastTrain.LOGGER.error(
+                    "Reward receipts exceed the cap of {} with no CLAIMED entries left to "
+                            + "evict; all {} PENDING receipts were kept and the campaign "
+                            + "pauses in SAFE_MODE",
+                    RewardOutboxPolicy.MAX_RECEIPTS,
+                    data.rewardReceipts.size());
+            if (data.status == CampaignStatus.RUNNING) {
+                data.status = CampaignStatus.SAFE_MODE;
+            }
         }
     }
 
@@ -1245,6 +1261,21 @@ public final class CampaignSavedData extends SavedData {
 
     public List<RewardReceipt> rewardReceipts() {
         return List.copyOf(rewardReceipts.values());
+    }
+
+    /**
+     * Drops a CLAIMED receipt. Used by the crate marker cap so a marker
+     * eviction always drops its receipt too; a PENDING receipt is never
+     * dropped, not even by explicit removal.
+     */
+    public boolean removeRewardReceipt(UUID id) {
+        RewardReceipt receipt = rewardReceipts.get(id);
+        if (receipt == null || receipt.state() != RewardOutboxPolicy.ReceiptState.CLAIMED) {
+            return false;
+        }
+        rewardReceipts.remove(id);
+        setDirty();
+        return true;
     }
 
     /**

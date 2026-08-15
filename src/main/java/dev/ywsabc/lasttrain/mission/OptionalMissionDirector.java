@@ -2,12 +2,20 @@ package dev.ywsabc.lasttrain.mission;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -30,7 +38,10 @@ import net.minecraft.world.phys.Vec3;
  */
 public final class OptionalMissionDirector {
     static final int UPDATE_ALL = 3;
+    /** Legacy single-marker key: migrated into the per-mission list on read. */
     static final String REWARD_OPERATION_KEY = "lasttrain_reward_operation";
+    /** Per-mission marker list: one entry per granted mission, never overwritten. */
+    private static final String REWARD_OPERATIONS_KEY = "lasttrain_reward_operations";
 
     private static final int APRON_HALF_LENGTH = 5;
     private static final int CAR_HALF_LENGTH = 2;
@@ -351,9 +362,14 @@ public final class OptionalMissionDirector {
     // ------------------------------------------------------------------
 
     private static void dispatchPendingRewards(ServerLevel level, CampaignSavedData data) {
+        if (data.status() == CampaignStatus.SAFE_MODE) {
+            // SAFE_MODE pauses world side effects; the outbox resumes as soon
+            // as the campaign leaves the safe state.
+            return;
+        }
+        BlockPos cratePos = rewardCratePos(data);
         for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
             String operationId = RewardOutboxPolicy.operationId(receipt.missionId());
-            BlockPos cratePos = rewardCratePos(data);
             boolean markerPresent = crateMarkerPresent(level, cratePos, operationId);
             RewardOutboxPolicy.GrantDecision decision =
                     RewardOutboxPolicy.reconcile(receipt.state(), markerPresent);
@@ -378,6 +394,12 @@ public final class OptionalMissionDirector {
                         false);
             }
         }
+        if (level.hasChunkAt(cratePos)) {
+            BlockEntity blockEntity = level.getBlockEntity(cratePos);
+            if (blockEntity instanceof ChestBlockEntity chest) {
+                capCrateMarkers(new ChestCrateAccess(chest), data);
+            }
+        }
     }
 
     /** The team supply crate sits near the starter station anchor. */
@@ -388,7 +410,64 @@ public final class OptionalMissionDirector {
     private static boolean crateMarkerPresent(ServerLevel level, BlockPos cratePos, String operationId) {
         BlockEntity blockEntity = level.getBlockEntity(cratePos);
         return blockEntity instanceof ChestBlockEntity chest
-                && operationId.equals(chest.getPersistentData().getString(REWARD_OPERATION_KEY));
+                && crateMarkers(chest.getPersistentData()).contains(operationId);
+    }
+
+    /**
+     * Every operation marker persisted on the crate, oldest first. The
+     * legacy single-marker key is migrated into the list on read; empty or
+     * duplicated entries are skipped.
+     */
+    private static List<String> crateMarkers(CompoundTag data) {
+        List<String> markers = new ArrayList<>();
+        ListTag list = data.getList(REWARD_OPERATIONS_KEY, Tag.TAG_STRING);
+        for (int index = 0; index < list.size(); index++) {
+            String marker = list.getString(index);
+            if (!marker.isEmpty() && !markers.contains(marker)) {
+                markers.add(marker);
+            }
+        }
+        String legacy = data.getString(REWARD_OPERATION_KEY);
+        if (!legacy.isEmpty() && !markers.contains(legacy)) {
+            markers.add(legacy);
+        }
+        return markers;
+    }
+
+    private static void saveCrateMarkers(ChestBlockEntity chest, List<String> markers) {
+        CompoundTag data = chest.getPersistentData();
+        ListTag list = new ListTag();
+        for (String marker : markers) {
+            list.add(StringTag.valueOf(marker));
+        }
+        data.put(REWARD_OPERATIONS_KEY, list);
+        data.remove(REWARD_OPERATION_KEY);
+        chest.setChanged();
+    }
+
+    /**
+     * Caps the crate marker set at {@link RewardOutboxPolicy#MAX_MARKERS}.
+     * Markers backed by PENDING receipts are never evicted; among the rest
+     * the oldest marker goes first and its CLAIMED receipt is dropped
+     * together with it — evicting only one side would let the surviving
+     * CLAIMED receipt re-open the grant loop on the next dispatch round.
+     */
+    static void capCrateMarkers(RewardOutboxPolicy.CrateAccess crate, CampaignSavedData data) {
+        Set<String> pendingMarkers = new HashSet<>();
+        for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
+            if (receipt.state() == RewardOutboxPolicy.ReceiptState.PENDING) {
+                pendingMarkers.add(RewardOutboxPolicy.operationId(receipt.missionId()));
+            }
+        }
+        for (String marker : RewardOutboxPolicy.excessMarkers(crate.operationIds(), pendingMarkers)) {
+            crate.removeOperationMarker(marker);
+            for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
+                if (RewardOutboxPolicy.operationId(receipt.missionId()).equals(marker)) {
+                    data.removeRewardReceipt(receipt.missionId());
+                    break;
+                }
+            }
+        }
     }
 
     private static ChestBlockEntity ensureRewardCrate(ServerLevel level, BlockPos cratePos) {
@@ -454,14 +533,26 @@ public final class OptionalMissionDirector {
         }
 
         @Override
-        public String operationId() {
-            return chest.getPersistentData().getString(REWARD_OPERATION_KEY);
+        public List<String> operationIds() {
+            return List.copyOf(crateMarkers(chest.getPersistentData()));
         }
 
         @Override
-        public void markOperation(String operationId) {
-            chest.getPersistentData().putString(REWARD_OPERATION_KEY, operationId);
-            chest.setChanged();
+        public void addOperationMarker(String operationId) {
+            List<String> markers = crateMarkers(chest.getPersistentData());
+            if (markers.contains(operationId)) {
+                return;
+            }
+            markers.add(operationId);
+            saveCrateMarkers(chest, markers);
+        }
+
+        @Override
+        public void removeOperationMarker(String operationId) {
+            List<String> markers = crateMarkers(chest.getPersistentData());
+            if (markers.remove(operationId)) {
+                saveCrateMarkers(chest, markers);
+            }
         }
     }
 

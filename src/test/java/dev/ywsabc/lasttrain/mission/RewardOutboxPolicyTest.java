@@ -5,13 +5,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy.CrateAccess;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy.GrantDecision;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy.ReceiptState;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy.RewardItem;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import org.junit.jupiter.api.Test;
 
 class RewardOutboxPolicyTest {
@@ -130,7 +136,7 @@ class RewardOutboxPolicyTest {
         List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
 
         FakeCrate crate = new FakeCrate();
-        crate.markOperation(operationId);
+        crate.addOperationMarker(operationId);
         // Crash mid-fill: only the first entry reached the crate.
         crate.addStack(payload.get(0));
 
@@ -155,9 +161,192 @@ class RewardOutboxPolicyTest {
         assertTrue(RewardOutboxPolicy.operationId(first).contains(first.toString()));
     }
 
+    @Test
+    void twoClaimedReceiptsDeliverExactlyOnceAcrossManyRounds() {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        FakeCrate crate = new FakeCrate();
+        String firstMarker = RewardOutboxPolicy.operationId(first);
+        String secondMarker = RewardOutboxPolicy.operationId(second);
+        List<RewardItem> firstPayload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, first);
+        List<RewardItem> secondPayload = RewardOutboxPolicy.payload(MissionType.SALVAGE_CAR, second);
+
+        // Two CLAIMED receipts in one shared crate. A single overwritten
+        // marker used to flip-flop: every round one of the two missions was
+        // misjudged as "marker lost" and re-granted forever. Per-mission
+        // markers must survive any dispatch order and any round count.
+        for (int round = 0; round < 5; round++) {
+            for (int order = 0; order < 2; order++) {
+                boolean reversed = (round + order) % 2 == 1;
+                UUID missionId = reversed ? second : first;
+                String marker = reversed ? secondMarker : firstMarker;
+                List<RewardItem> payload = reversed ? secondPayload : firstPayload;
+                GrantDecision decision = RewardOutboxPolicy.reconcile(
+                        ReceiptState.CLAIMED,
+                        crate.operationIds().contains(marker));
+                if (decision != GrantDecision.NO_OP) {
+                    assertTrue(RewardOutboxPolicy.fillCrate(crate, marker, payload));
+                }
+            }
+            // Exact payload counts: no doubling from marker overwrites. The
+            // shared crate legitimately merges the 4+4 iron ingots of the two
+            // payloads, so seven slots hold exactly one payload of each kind.
+            assertEquals(
+                    8,
+                    RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:bread", 8)));
+            assertEquals(
+                    1,
+                    RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.credential(second)));
+            assertEquals(
+                    8,
+                    RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:iron_ingot", 4)));
+            assertEquals(
+                    8,
+                    RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:redstone", 8)));
+            assertEquals(7, crate.contents().size());
+            assertEquals(Set.of(firstMarker, secondMarker), new HashSet<>(crate.operationIds()));
+        }
+        // Both receipts stay CLAIMED with their own markers present → NO_OP forever.
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, crate.operationIds().contains(firstMarker)));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, crate.operationIds().contains(secondMarker)));
+    }
+
+    @Test
+    void fullCrateIsNotMarkedAndRetriesOnceSpaceFrees() {
+        UUID missionId = UUID.randomUUID();
+        String marker = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+        crate.refuseAdds = true;
+
+        // CLAIMED receipt, marker absent, crate full of unrelated content:
+        // the grant cannot complete and the crate must NOT be marked, or the
+        // receipt would misjudge itself as delivered and stall as NO_OP.
+        assertEquals(
+                GrantDecision.GRANT_AND_CLAIM,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, false));
+        assertFalse(RewardOutboxPolicy.fillCrate(crate, marker, payload));
+        assertTrue(crate.operationIds().isEmpty());
+
+        // Space frees up: the retry delivers exactly once and marks the crate.
+        crate.refuseAdds = false;
+        assertTrue(RewardOutboxPolicy.fillCrate(crate, marker, payload));
+        assertTrue(crate.operationIds().contains(marker));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, crate.operationIds().contains(marker)));
+        assertEquals(
+                8,
+                RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:bread", 8)));
+    }
+
+    @Test
+    void lootedCrateKeepsItsMarkerAndIsNotRegranted() {
+        UUID missionId = UUID.randomUUID();
+        String marker = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+        assertTrue(RewardOutboxPolicy.fillCrate(crate, marker, payload));
+        // The player took every item; only the marker remains.
+        crate.slots.clear();
+
+        // CLAIMED + marker present → NO_OP: a looted crate is not misjudged
+        // as "marker lost" and never refilled.
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, crate.operationIds().contains(marker)));
+        assertTrue(crate.contents().isEmpty());
+        assertTrue(crate.operationIds().contains(marker));
+    }
+
+    @Test
+    void markerCapEvictsClaimedMarkersAndPairsTheirReceipts() {
+        UUID pending = UUID.randomUUID();
+        UUID claimedFirst = UUID.randomUUID();
+        UUID claimedSecond = UUID.randomUUID();
+        CampaignSavedData data = receiptsData(pending, claimedFirst, claimedSecond);
+
+        FakeCrate crate = new FakeCrate();
+        // Oldest first: the PENDING-backed marker is the oldest evictable
+        // candidate and must be skipped; the oldest CLAIMED marker is the victim.
+        crate.addOperationMarker(RewardOutboxPolicy.operationId(pending));
+        crate.addOperationMarker(RewardOutboxPolicy.operationId(claimedFirst));
+        crate.addOperationMarker(RewardOutboxPolicy.operationId(claimedSecond));
+        for (int index = 0; index < RewardOutboxPolicy.MAX_MARKERS - 2; index++) {
+            crate.addOperationMarker("orphan/" + index);
+        }
+        assertEquals(RewardOutboxPolicy.MAX_MARKERS + 1, crate.operationIds().size());
+
+        OptionalMissionDirector.capCrateMarkers(crate, data);
+
+        assertEquals(RewardOutboxPolicy.MAX_MARKERS, crate.operationIds().size());
+        assertTrue(crate.operationIds().contains(RewardOutboxPolicy.operationId(pending)));
+        assertFalse(crate.operationIds().contains(RewardOutboxPolicy.operationId(claimedFirst)));
+        assertTrue(crate.operationIds().contains(RewardOutboxPolicy.operationId(claimedSecond)));
+        // The evicted marker's CLAIMED receipt is dropped with it, so the
+        // surviving receipts can never re-open the grant loop.
+        assertTrue(data.rewardReceipt(pending).isPresent());
+        assertTrue(data.rewardReceipt(claimedFirst).isEmpty());
+        assertTrue(data.rewardReceipt(claimedSecond).isPresent());
+    }
+
+    @Test
+    void markerCapNeverEvictsPendingBackedMarkers() {
+        // A corrupted save with more PENDING receipts than the cap: every
+        // receipt is kept, every crate marker is PENDING-backed, and the
+        // marker set is allowed to exceed the cap instead of evicting.
+        CompoundTag tag = new CompoundTag();
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        List<String> markers = new ArrayList<>();
+        for (int index = 0; index < RewardOutboxPolicy.MAX_RECEIPTS + 1; index++) {
+            UUID missionId = UUID.randomUUID();
+            receipts.add(receiptTag(missionId, "PENDING"));
+            markers.add(RewardOutboxPolicy.operationId(missionId));
+        }
+        tag.put("reward_receipts", receipts);
+        CampaignSavedData data = CampaignSavedData.load(tag, null);
+
+        FakeCrate crate = new FakeCrate();
+        markers.forEach(crate::addOperationMarker);
+
+        OptionalMissionDirector.capCrateMarkers(crate, data);
+
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS + 1, data.rewardReceipts().size());
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS + 1, crate.operationIds().size());
+        assertEquals(new HashSet<>(markers), new HashSet<>(crate.operationIds()));
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+    }
+
+    private static CompoundTag receiptTag(UUID id, String state) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("mission_id", id.toString());
+        tag.putString("type", "rescue_survivor");
+        tag.putString("state", state);
+        return tag;
+    }
+
+    private static CampaignSavedData receiptsData(UUID pending, UUID claimedFirst, UUID claimedSecond) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        receipts.add(receiptTag(pending, "PENDING"));
+        receipts.add(receiptTag(claimedFirst, "CLAIMED"));
+        receipts.add(receiptTag(claimedSecond, "CLAIMED"));
+        tag.put("reward_receipts", receipts);
+        return CampaignSavedData.load(tag, null);
+    }
+
     private static final class FakeCrate implements CrateAccess {
         private final List<RewardItem> slots = new ArrayList<>();
-        private String operationId = "";
+        private final List<String> markers = new ArrayList<>();
+        private boolean refuseAdds;
         private boolean marked;
 
         @Override
@@ -167,6 +356,9 @@ class RewardOutboxPolicyTest {
 
         @Override
         public void addStack(RewardItem stack) {
+            if (refuseAdds) {
+                return;
+            }
             for (int index = 0; index < slots.size(); index++) {
                 RewardItem existing = slots.get(index);
                 boolean sameKind = stack.credentialMissionId().isPresent()
@@ -186,14 +378,21 @@ class RewardOutboxPolicyTest {
         }
 
         @Override
-        public String operationId() {
-            return operationId;
+        public List<String> operationIds() {
+            return List.copyOf(markers);
         }
 
         @Override
-        public void markOperation(String operationId) {
-            this.operationId = operationId;
-            this.marked = true;
+        public void addOperationMarker(String operationId) {
+            if (!markers.contains(operationId)) {
+                markers.add(operationId);
+            }
+            marked = true;
+        }
+
+        @Override
+        public void removeOperationMarker(String operationId) {
+            markers.remove(operationId);
         }
     }
 }

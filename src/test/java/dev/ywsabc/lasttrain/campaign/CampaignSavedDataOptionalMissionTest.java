@@ -397,6 +397,132 @@ class CampaignSavedDataOptionalMissionTest {
     }
 
     @Test
+    void allPendingReceiptFloodKeepsEveryReceiptAndParksTheCampaign() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        for (int index = 0; index < RewardOutboxPolicy.MAX_RECEIPTS + 1; index++) {
+            receipts.add(receiptTag(UUID.randomUUID(), "PENDING"));
+        }
+        tag.put("reward_receipts", receipts);
+
+        CampaignSavedData data = CampaignSavedData.load(tag, null);
+
+        // A corrupted save with more undelivered PENDING receipts than the cap
+        // must lose nothing: the flood is kept whole and the campaign pauses.
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS + 1, data.rewardReceipts().size());
+        assertTrue(data.rewardReceipts().stream()
+                .allMatch(receipt -> receipt.state() == RewardOutboxPolicy.ReceiptState.PENDING));
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+
+        // The flood and the safe state survive a save/load round-trip.
+        CampaignSavedData reloaded = CampaignSavedData.load(data.save(new CompoundTag(), null), null);
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS + 1, reloaded.rewardReceipts().size());
+        assertEquals(CampaignStatus.SAFE_MODE, reloaded.status());
+    }
+
+    @Test
+    void mixedReceiptOverflowEvictsOnlyTheOldestClaimedEntries() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        UUID oldestPending = UUID.randomUUID();
+        for (int index = 0; index < 40; index++) {
+            receipts.add(receiptTag(index == 0 ? oldestPending : UUID.randomUUID(), "PENDING"));
+        }
+        for (int index = 40; index < 300; index++) {
+            receipts.add(receiptTag(UUID.randomUUID(), "CLAIMED"));
+        }
+        tag.put("reward_receipts", receipts);
+
+        CampaignSavedData data = CampaignSavedData.load(tag, null);
+
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS, data.rewardReceipts().size());
+        // All 40 PENDING receipts survive; only the 44 oldest CLAIMED were evicted.
+        assertEquals(
+                40,
+                data.rewardReceipts().stream()
+                        .filter(receipt -> receipt.state() == RewardOutboxPolicy.ReceiptState.PENDING)
+                        .count());
+        assertEquals(
+                RewardOutboxPolicy.MAX_RECEIPTS - 40,
+                data.rewardReceipts().stream()
+                        .filter(receipt -> receipt.state() == RewardOutboxPolicy.ReceiptState.CLAIMED)
+                        .count());
+        assertTrue(data.rewardReceipt(oldestPending).isPresent());
+        assertEquals(CampaignStatus.RUNNING, data.status());
+    }
+
+    @Test
+    void pendingFloodBeyondClaimedEntriesKeepsPendingAndParksTheCampaign() {
+        // 260 PENDING + 40 CLAIMED: every CLAIMED entry is evicted, all 260
+        // PENDING survive even though that exceeds the cap, and the campaign
+        // parks in SAFE_MODE instead of silently dropping undelivered rewards.
+        CompoundTag tag = new CompoundTag();
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        for (int index = 0; index < 260; index++) {
+            receipts.add(receiptTag(UUID.randomUUID(), "PENDING"));
+        }
+        for (int index = 260; index < 300; index++) {
+            receipts.add(receiptTag(UUID.randomUUID(), "CLAIMED"));
+        }
+        tag.put("reward_receipts", receipts);
+
+        CampaignSavedData data = CampaignSavedData.load(tag, null);
+
+        assertEquals(260, data.rewardReceipts().size());
+        assertTrue(data.rewardReceipts().stream()
+                .allMatch(receipt -> receipt.state() == RewardOutboxPolicy.ReceiptState.PENDING));
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+    }
+
+    @Test
+    void completedCampaignsKeepTheirStatusOnARewardFlood() {
+        // A corrupt flood inside a finished campaign must not revive it: the
+        // receipts are kept but the status stays COMPLETED.
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("schema_version", CampaignSavedData.CURRENT_SCHEMA);
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.COMPLETED.name());
+        tag.putInt("day", CampaignSavedData.FINAL_DAY);
+        tag.putBoolean("final_day_elapsed", true);
+        tag.putBoolean("finale_mission_completed", true);
+        ListTag receipts = new ListTag();
+        for (int index = 0; index < RewardOutboxPolicy.MAX_RECEIPTS + 1; index++) {
+            receipts.add(receiptTag(UUID.randomUUID(), "PENDING"));
+        }
+        tag.put("reward_receipts", receipts);
+
+        CampaignSavedData data = CampaignSavedData.load(tag, null);
+
+        assertEquals(RewardOutboxPolicy.MAX_RECEIPTS + 1, data.rewardReceipts().size());
+        assertEquals(CampaignStatus.COMPLETED, data.status());
+    }
+
+    @Test
+    void rewardReceiptRemovalOnlyDropsClaimedEntries() {
+        CampaignSavedData data = started();
+        assertTrue(data.proposeOptionalMission(MissionType.RESCUE_SURVIVOR));
+        UUID id = data.proposedMission().id();
+        data.acceptProposal(id, null);
+        data.recordSurvivorRescued(id);
+        assertTrue(data.completeOptionalMission(id));
+
+        // A PENDING receipt is never evicted, not even by explicit removal.
+        assertFalse(data.removeRewardReceipt(id));
+        assertTrue(data.rewardReceipt(id).isPresent());
+
+        assertTrue(data.markRewardClaimed(id));
+        assertTrue(data.removeRewardReceipt(id));
+        assertTrue(data.rewardReceipt(id).isEmpty());
+        assertFalse(data.removeRewardReceipt(UUID.randomUUID()));
+    }
+
+    @Test
     void schemaSixSavesLoadWithSafeOptionalDefaultsAndStayCompleted() {
         CompoundTag old = new CompoundTag();
         old.putInt("schema_version", 6);

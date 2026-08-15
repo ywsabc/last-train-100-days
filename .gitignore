@@ -29,3 +29,6 @@ packwiz-installer*.jar
 # OS
 .DS_Store
 Thumbs.db
+
+# Local gradle home for sandboxed builds
+.gradle-user/
