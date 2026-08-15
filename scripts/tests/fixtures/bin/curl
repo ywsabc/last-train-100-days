@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+lasttrain_fake_output=""
+lasttrain_fake_previous=""
+for lasttrain_fake_arg in "$@"; do
+  if [[ "$lasttrain_fake_previous" == "-o" ]]; then
+    lasttrain_fake_output="$lasttrain_fake_arg"
+  fi
+  lasttrain_fake_previous="$lasttrain_fake_arg"
+done
+
+[[ -n "$lasttrain_fake_output" ]] || {
+  echo "fake curl did not receive -o" >&2
+  exit 1
+}
+printf 'download fixture\n' > "$lasttrain_fake_output"

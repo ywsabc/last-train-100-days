@@ -6,8 +6,11 @@ out/
 # Minecraft run directories
 run/
 runs/
+/dev-server/
+/dev-client/
 logs/
 crash-reports/
+/repo/
 
 # IDE
 .idea/
@@ -20,8 +23,9 @@ crash-reports/
 # Local dependencies and generated files
 libs/
 src/generated/
+packwiz-installer*.jar
+*.mrpack
 
 # OS
 .DS_Store
 Thumbs.db
-

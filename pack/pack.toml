@@ -1,0 +1,13 @@
+name = "Last Train: 100 Days"
+author = "ywsabc"
+version = "0.1.0-alpha.4"
+pack-format = "packwiz:1.1.0"
+
+[index]
+file = "index.toml"
+hash-format = "sha256"
+hash = "0f3e986d58e2086316ebea6ef208af1a2e4b7347909afb7f99f91c39c19ce7bd"
+
+[versions]
+minecraft = "1.21.1"
+neoforge = "21.1.244"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+simurail_fake_check="false"
+for simurail_fake_arg in "$@"; do
+  if [[ "$simurail_fake_arg" == "--check" ]]; then
+    simurail_fake_check="true"
+  fi
+done
+
+if [[ "$simurail_fake_check" == "true" ]]; then
+  while IFS= read -r simurail_fake_line; do
+    [[ -n "$simurail_fake_line" ]] || continue
+    printf 'sha256-check|%s\n' "$simurail_fake_line" \
+      >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+    simurail_fake_hash="${simurail_fake_line%%  *}"
+    simurail_fake_file="${simurail_fake_line#*  }"
+    if [[ "$simurail_fake_hash" != \
+      "8417fadd7f6a5afa7322e191326f423344d68937f724ebf684485d02e8de9144" ]] ||
+      [[ ! -f "$simurail_fake_file" ]] ||
+      ! grep -qx 'pinned Simurail source fixture' "$simurail_fake_file"; then
+      exit 1
+    fi
+  done
+  exit 0
+fi
+
+exec "${LASTTRAIN_SIMURAIL_TEST_REAL_SHA256SUM:?}" "$@"

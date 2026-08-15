@@ -1,0 +1,3 @@
+[general]
+cacheRetentionTicks = 20
+perPlayerRadius = 96

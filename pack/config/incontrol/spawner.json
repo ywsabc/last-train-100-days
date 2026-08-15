@@ -1,0 +1,86 @@
+[
+  {
+    "mob": "minecraft:zombie",
+    "persecond": 0.2,
+    "attempts": 12,
+    "amount": {
+      "minimum": 1,
+      "maximum": 3
+    },
+    "conditions": {
+      "dimension": "minecraft:overworld",
+      "norestrictions": true,
+      "mindist": 28,
+      "maxdist": 96,
+      "minheight": -64,
+      "maxheight": 256,
+      "maxthis": 40
+    }
+  },
+  {
+    "mob": "minecraft:zombie",
+    "number": {
+      "name": "lasttrain_day",
+      "expression": "ge(25)"
+    },
+    "persecond": 0.12,
+    "attempts": 8,
+    "amount": {
+      "minimum": 1,
+      "maximum": 3
+    },
+    "conditions": {
+      "dimension": "minecraft:overworld",
+      "norestrictions": true,
+      "mindist": 24,
+      "maxdist": 88,
+      "minheight": -64,
+      "maxheight": 256,
+      "maxthis": 60
+    }
+  },
+  {
+    "mob": "minecraft:zombie",
+    "number": {
+      "name": "lasttrain_day",
+      "expression": "ge(50)"
+    },
+    "persecond": 0.1,
+    "attempts": 8,
+    "amount": {
+      "minimum": 2,
+      "maximum": 4
+    },
+    "conditions": {
+      "dimension": "minecraft:overworld",
+      "norestrictions": true,
+      "mindist": 22,
+      "maxdist": 80,
+      "minheight": -64,
+      "maxheight": 256,
+      "maxthis": 80
+    }
+  },
+  {
+    "mob": "minecraft:zombie",
+    "number": {
+      "name": "lasttrain_day",
+      "expression": "ge(75)"
+    },
+    "persecond": 0.08,
+    "attempts": 10,
+    "amount": {
+      "minimum": 2,
+      "maximum": 5
+    },
+    "conditions": {
+      "dimension": "minecraft:overworld",
+      "norestrictions": true,
+      "mindist": 20,
+      "maxdist": 72,
+      "minheight": -64,
+      "maxheight": 256,
+      "maxthis": 100
+    }
+  }
+]

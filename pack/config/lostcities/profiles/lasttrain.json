@@ -1,0 +1,29 @@
+{
+  "public": true,
+  "lostcity": {
+    "description": "Last Train rare ruined city zones without competing railway generation",
+    "extraDescription": "Create rail infrastructure is owned by TongDa Railway and the campaign route director.",
+    "railwaysCanEnd": true,
+    "railwaysEnabled": false,
+    "railwayStationsEnabled": false,
+    "railwaySurfaceStationsEnabled": false,
+    "highwayDistanceMask": 0,
+    "ruinChance": 0.35,
+    "ruinMinlevelPercent": 0.2,
+    "ruinMaxlevelPercent": 0.8,
+    "rubbleLayer": true,
+    "buildingMaxFloors": 8,
+    "buildingMaxFloorsChance": 6,
+    "generateSpawners": false,
+    "generateLoot": true
+  },
+  "cities": {
+    "cityChance": 0.0015,
+    "cityMinRadius": 45,
+    "cityMaxRadius": 110
+  },
+  "explosions": {
+    "explosionChance": 0.0,
+    "miniExplosionChance": 0.0
+  }
+}

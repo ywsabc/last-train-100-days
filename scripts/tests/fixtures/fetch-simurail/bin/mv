@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+simurail_fake_args=("$@")
+simurail_fake_count="${#simurail_fake_args[@]}"
+(( simurail_fake_count >= 2 )) || {
+  echo "fake mv expected a source and destination" >&2
+  exit 2
+}
+simurail_fake_source="${simurail_fake_args[simurail_fake_count - 2]}"
+simurail_fake_destination="${simurail_fake_args[simurail_fake_count - 1]}"
+
+printf 'mv|%s|%s\n' "$simurail_fake_source" "$simurail_fake_destination" \
+  >> "${LASTTRAIN_SIMURAIL_TEST_LOG:?}"
+exec "${LASTTRAIN_SIMURAIL_TEST_REAL_MV:?}" "$@"

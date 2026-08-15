@@ -1,0 +1,13 @@
+name = "The Hordes"
+filename = "The-Hordes-1.21.1-1.6.3d.jar"
+side = "both"
+
+[download]
+url = "https://cdn.modrinth.com/data/O3HDffUR/versions/DdgxRTYb/The-Hordes-1.21.1-1.6.3d.jar"
+hash-format = "sha512"
+hash = "b65244e6400981e8a8f4b0c5b1b17a6d1327336ab14b3eeea77fe5e69550a95b8c80b775e05b9fafea23d4eb3c386087ff75d1493c309ea3ae64debd4e93d4e2"
+
+[update]
+[update.modrinth]
+mod-id = "O3HDffUR"
+version = "DdgxRTYb"

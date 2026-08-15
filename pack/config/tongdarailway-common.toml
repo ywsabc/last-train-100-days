@@ -1,0 +1,7 @@
+# Every TongDa 4096-block planning region should attempt a railway network.
+# TongDa still caps its own current planner at 100 regions from origin; the
+# campaign route adapter will bridge that upstream limitation.
+areaGenerationRailwayProbability = 1.0
+enableTrackSpawner = true
+generateTrackSpawner = true
+placeTracksUsingTrackSpawner = true

@@ -1,0 +1,13 @@
+name = "Sable Pathfinder"
+filename = "sable_pathfinder-1.4.0.jar"
+side = "both"
+
+[download]
+url = "https://cdn.modrinth.com/data/AYL8Vuuk/versions/U5bZr5zH/sable_pathfinder-1.4.0.jar"
+hash-format = "sha512"
+hash = "28a22af0f3c7963fd13ed572868293d7d22b4cfbdb2d42aa272356e8793330e2c0b9ee99e63efbd95b299587624ab655f96bff2dff576654463b7d497e76548c"
+
+[update]
+[update.modrinth]
+mod-id = "AYL8Vuuk"
+version = "U5bZr5zH"

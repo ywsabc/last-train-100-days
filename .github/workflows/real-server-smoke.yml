@@ -1,0 +1,65 @@
+name: Real server discovery smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '21 3 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  install-and-discover-mods:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      GH_TOKEN: ${{ github.token }}
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m
+      LASTTRAIN_SERVER: /tmp/lasttrain-server
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07 # v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+
+      - name: Install the real pinned server pack
+        run: ./scripts/install-dev-server.sh "$LASTTRAIN_SERVER"
+
+      - name: Discover all server mods without accepting the EULA
+        working-directory: /tmp/lasttrain-server
+        run: ./run.sh nogui
+
+      - name: Verify the legal stop and required mod discovery
+        run: |
+          lasttrain_core_version="$(sed -n 's/^mod_version=//p' gradle.properties | sed -n '1p')"
+          test -n "$lasttrain_core_version"
+          grep -qx 'eula=false' "$LASTTRAIN_SERVER/eula.txt"
+          grep -Fq 'Create Simurail 0.0.0-a+e68481d (simurail)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'Sable 2.0.3 (sable)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'Create Simulated 1.3.0 (simulated)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'Create Aeronautics 1.3.0 (aeronautics)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'Sable: Pathfinder 1.4.0 (sable_pathfinder)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'TongDaRailway 1.1.3+mc21.1 (tongdarailway)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'Timeless & Classics Guns: Zero 1.1.8-hotfix-r5 (tacz)' "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq "Last Train: 100 Days $lasttrain_core_version (lasttrain)" "$LASTTRAIN_SERVER/logs/latest.log"
+          grep -Fq 'You need to agree to the EULA' "$LASTTRAIN_SERVER/logs/latest.log"
+          test ! -d "$LASTTRAIN_SERVER/crash-reports" ||
+            test -z "$(find "$LASTTRAIN_SERVER/crash-reports" -maxdepth 1 -type f -print -quit)"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: real-server-discovery-smoke-logs
+          path: /tmp/lasttrain-server/logs
+          if-no-files-found: warn
