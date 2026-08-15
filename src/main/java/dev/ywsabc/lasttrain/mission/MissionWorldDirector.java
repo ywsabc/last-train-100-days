@@ -41,6 +41,51 @@ public final class MissionWorldDirector {
     private MissionWorldDirector() {
     }
 
+    /**
+     * X offsets, relative to the mission site, for every materialized
+     * objective of a mission. The default targets preserve the original
+     * prototype layouts; larger frozen targets extend them symmetrically so
+     * one save keeps the same interpretation after a mod update.
+     */
+    static int[] objectiveXOffsets(MissionType type, int target) {
+        int count = Math.max(1, target);
+        int[] offsets = new int[count];
+        return switch (type) {
+            case RAIL_BREAK, SUPPLY_RECOVERY -> {
+                int first = -(count / 2);
+                for (int index = 0; index < count; index++) {
+                    offsets[index] = first + index;
+                }
+                yield offsets;
+            }
+            case STATION_POWER, STATION_GATE -> {
+                int first = -(count - 1);
+                for (int index = 0; index < count; index++) {
+                    offsets[index] = first + 2 * index;
+                }
+                yield offsets;
+            }
+            case ZOMBIE_BLOCKADE -> new int[0];
+        };
+    }
+
+    private static boolean containsObjectiveXOffset(int[] offsets, int dx) {
+        for (int offset : offsets) {
+            if (offset == dx) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int maxAbs(int[] values) {
+        int max = 0;
+        for (int value : values) {
+            max = Math.max(max, Math.abs(value));
+        }
+        return max;
+    }
+
     public static void tick(MinecraftServer server, CampaignSavedData data, int serverTick) {
         if (serverTick % TICK_INTERVAL != 0) {
             return;
@@ -120,7 +165,7 @@ public final class MissionWorldDirector {
 
     private static boolean prepare(ServerLevel level, ActiveMission mission) {
         try {
-            buildMissionApron(level, mission.site());
+            buildMissionApron(level, mission);
             return switch (mission.type()) {
                 case RAIL_BREAK -> prepareRailBreak(level, mission);
                 case STATION_POWER -> prepareStationPower(level, mission);
@@ -148,9 +193,11 @@ public final class MissionWorldDirector {
         };
     }
 
-    private static void buildMissionApron(ServerLevel level, BlockPos site) {
-        BlockPos floor = site.below();
-        for (int x = -5; x <= 5; x++) {
+    private static void buildMissionApron(ServerLevel level, ActiveMission mission) {
+        BlockPos floor = mission.site().below();
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        int halfWidth = Math.max(5, maxAbs(offsets) + 2);
+        for (int x = -halfWidth; x <= halfWidth; x++) {
             for (int z = -7; z <= 7; z++) {
                 if (Math.abs(z) <= 1) {
                     continue;
@@ -165,7 +212,7 @@ public final class MissionWorldDirector {
 
     private static boolean prepareRailBreak(ServerLevel level, ActiveMission mission) {
         BlockPos site = mission.site();
-        for (int offset = -1; offset <= 1; offset++) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockPos track = site.offset(offset, 0, 0);
             level.setBlock(track, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
             level.setBlock(
@@ -177,8 +224,7 @@ public final class MissionWorldDirector {
     }
 
     private static boolean prepareStationPower(ServerLevel level, ActiveMission mission) {
-        int[] offsets = {-3, -1, 1, 3};
-        for (int offset : offsets) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockPos base = mission.site().offset(offset, -1, 4);
             level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
             level.setBlock(
@@ -199,7 +245,7 @@ public final class MissionWorldDirector {
     }
 
     private static boolean prepareStationGate(ServerLevel level, ActiveMission mission) {
-        int[] offsets = {-1, 1};
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         for (int index = 0; index < offsets.length; index++) {
             BlockPos lower = mission.site().offset(offsets[index], 0, 4);
             placeGateDoor(level, lower, index);
@@ -248,15 +294,20 @@ public final class MissionWorldDirector {
             Items.ARROW
         };
         int[] counts = {4, 8, 8, 8, 16};
-        for (int index = 0; index < supplies.length; index++) {
-            BlockPos barrelPos = mission.site().offset(index - 2, 0, 4);
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        for (int index = 0; index < offsets.length; index++) {
+            BlockPos barrelPos = mission.site().offset(offsets[index], 0, 4);
             level.setBlock(barrelPos, Blocks.BARREL.defaultBlockState(), UPDATE_ALL);
             BlockEntity blockEntity = level.getBlockEntity(barrelPos);
             if (!(blockEntity instanceof Container barrel)) {
                 return false;
             }
             barrel.clearContent();
-            barrel.setItem(0, new ItemStack(supplies[index], counts[index]));
+            barrel.setItem(
+                    0,
+                    new ItemStack(
+                            supplies[index % supplies.length],
+                            counts[index % counts.length]));
             blockEntity.getPersistentData().putString(
                     SUPPLY_MISSION_ID_KEY,
                     mission.id().toString());
@@ -306,7 +357,7 @@ public final class MissionWorldDirector {
     }
 
     private static void repairStationPower(ServerLevel level, ActiveMission mission) {
-        for (int offset : new int[]{-3, -1, 1, 3}) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockPos base = mission.site().offset(offset, -1, 4);
             if (!level.getBlockState(base).is(Blocks.IRON_BLOCK)) {
                 level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
@@ -330,7 +381,7 @@ public final class MissionWorldDirector {
     }
 
     private static void repairStationGate(ServerLevel level, ActiveMission mission) {
-        int[] offsets = {-1, 1};
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         for (int index = 0; index < offsets.length; index++) {
             BlockPos lower = mission.site().offset(offsets[index], 0, 4);
             if (!level.getBlockState(lower).is(Blocks.IRON_DOOR)
@@ -352,8 +403,9 @@ public final class MissionWorldDirector {
     }
 
     private static boolean repairSupplyBarrels(ServerLevel level, ActiveMission mission) {
-        for (int index = 0; index < 5; index++) {
-            BlockPos barrelPos = mission.site().offset(index - 2, 0, 4);
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        for (int index = 0; index < offsets.length; index++) {
+            BlockPos barrelPos = mission.site().offset(offsets[index], 0, 4);
             if (!level.getBlockState(barrelPos).is(Blocks.BARREL)) {
                 level.setBlock(barrelPos, Blocks.BARREL.defaultBlockState(), UPDATE_ALL);
             }
@@ -446,7 +498,7 @@ public final class MissionWorldDirector {
     private static int observeRailRepair(ServerLevel level, ActiveMission mission) {
         Block track = registeredBlock("create:track");
         int repaired = 0;
-        for (int offset = -1; offset <= 1; offset++) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockState state = level.getBlockState(mission.site().offset(offset, 0, 0));
             if (state.is(track) && propertyIs(state, "shape", "xo")) {
                 repaired++;
@@ -457,7 +509,7 @@ public final class MissionWorldDirector {
 
     private static int observePoweredLevers(ServerLevel level, ActiveMission mission) {
         int powered = 0;
-        for (int offset : new int[]{-3, -1, 1, 3}) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
             if (state.is(Blocks.LEVER) && propertyIs(state, "powered", "true")) {
                 powered++;
@@ -468,7 +520,7 @@ public final class MissionWorldDirector {
 
     private static int observeOpenDoors(ServerLevel level, ActiveMission mission) {
         int opened = 0;
-        for (int offset : new int[]{-1, 1}) {
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
             if (state.is(Blocks.IRON_DOOR) && propertyIs(state, "open", "true")) {
                 opened++;
@@ -479,11 +531,12 @@ public final class MissionWorldDirector {
 
     private static int observeRecoveredBarrels(ServerLevel level, ActiveMission mission) {
         int recovered = 0;
-        for (int index = 0; index < 5; index++) {
-            BlockEntity blockEntity =
-                    level.getBlockEntity(mission.site().offset(index - 2, 0, 4));
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        for (int index = 0; index < offsets.length; index++) {
+            BlockPos barrelPos = mission.site().offset(offsets[index], 0, 4);
+            BlockEntity blockEntity = level.getBlockEntity(barrelPos);
             if (blockEntity instanceof Container barrel
-                    && level.getBlockState(mission.site().offset(index - 2, 0, 4)).is(Blocks.BARREL)
+                    && level.getBlockState(barrelPos).is(Blocks.BARREL)
                     && mission.id().toString().equals(
                             blockEntity.getPersistentData().getString(SUPPLY_MISSION_ID_KEY))
                     && blockEntity.getPersistentData().getInt(SUPPLY_INDEX_KEY) == index
@@ -507,7 +560,7 @@ public final class MissionWorldDirector {
                 if (track == Blocks.AIR) {
                     return false;
                 }
-                for (int offset = -1; offset <= 1; offset++) {
+                for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
                     level.setBlock(
                             mission.site().offset(offset, 0, 0),
                             RouteTrackStates.eastbound(track),
@@ -631,16 +684,19 @@ public final class MissionWorldDirector {
         int dx = pos.getX() - site.getX();
         int dy = pos.getY() - site.getY();
         int dz = pos.getZ() - site.getZ();
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         return switch (mission.type()) {
             case STATION_POWER -> isRouteBarrierOffset(dx, dy, dz)
-                    || ((Math.abs(dx) == 1 || Math.abs(dx) == 3)
+                    || (containsObjectiveXOffset(offsets, dx)
                             && ((dy == -1 && (dz == 4 || dz == 5))
                                     || (dy == 0 && dz == 4)));
             case STATION_GATE -> isRouteBarrierOffset(dx, dy, dz)
-                    || (Math.abs(dx) == 1
+                    || (containsObjectiveXOffset(offsets, dx)
                             && ((dz == 4 && dy >= -1 && dy <= 1)
                                     || (dz == 3 && dy >= -1 && dy <= 0)));
-            case SUPPLY_RECOVERY -> dy == 0 && dz == 4 && dx >= -2 && dx <= 2;
+            case SUPPLY_RECOVERY -> dy == 0
+                    && dz == 4
+                    && containsObjectiveXOffset(offsets, dx);
             case RAIL_BREAK, ZOMBIE_BLOCKADE -> false;
         };
     }
@@ -695,6 +751,7 @@ public final class MissionWorldDirector {
         int dx = pos.getX() - site.getX();
         int dy = pos.getY() - site.getY();
         int dz = pos.getZ() - site.getZ();
+        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         if ((mission.type() == MissionType.STATION_POWER
                         || mission.type() == MissionType.STATION_GATE)
                 && isRouteBarrierOffset(dx, dy, dz)) {
@@ -704,26 +761,28 @@ public final class MissionWorldDirector {
         }
         return switch (mission.type()) {
             case STATION_POWER -> {
-                if ((Math.abs(dx) == 1 || Math.abs(dx) == 3) && dz == 4) {
+                if (containsObjectiveXOffset(offsets, dx) && dz == 4) {
                     yield dy == -1
                             ? RegeneratedMissionDrop.IRON_BLOCK
                             : dy == 0
                                     ? RegeneratedMissionDrop.LEVER
                                     : RegeneratedMissionDrop.NONE;
                 }
-                yield (Math.abs(dx) == 1 || Math.abs(dx) == 3) && dy == -1 && dz == 5
+                yield containsObjectiveXOffset(offsets, dx) && dy == -1 && dz == 5
                         ? RegeneratedMissionDrop.REDSTONE_LAMP
                         : RegeneratedMissionDrop.NONE;
             }
             case STATION_GATE -> {
-                if (Math.abs(dx) == 1 && dz == 4 && dy >= 0 && dy <= 1) {
+                if (containsObjectiveXOffset(offsets, dx) && dz == 4 && dy >= 0 && dy <= 1) {
                     yield RegeneratedMissionDrop.IRON_DOOR;
                 }
-                yield Math.abs(dx) == 1 && dy == 0 && dz == 3
+                yield containsObjectiveXOffset(offsets, dx) && dy == 0 && dz == 3
                         ? RegeneratedMissionDrop.LEVER
                         : RegeneratedMissionDrop.NONE;
             }
-            case SUPPLY_RECOVERY -> dy == 0 && dz == 4 && dx >= -2 && dx <= 2
+            case SUPPLY_RECOVERY -> dy == 0
+                    && dz == 4
+                    && containsObjectiveXOffset(offsets, dx)
                     ? RegeneratedMissionDrop.BARREL
                     : RegeneratedMissionDrop.NONE;
             case RAIL_BREAK, ZOMBIE_BLOCKADE -> RegeneratedMissionDrop.NONE;

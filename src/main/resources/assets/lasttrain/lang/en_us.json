@@ -12,7 +12,7 @@
   "command.lasttrain.mission.status": "Mission: %s — %s/%s, route segment %s, stage %s",
   "command.lasttrain.route_advanced": "Route advanced to segment %s.",
   "command.lasttrain.started": "Last Train: 100 Days has started.",
-  "command.lasttrain.status": "Day %s/%s — %s — route %s — threat %s",
+  "command.lasttrain.status": "Day %s/%s — %s — route %s — threat %s — players %s effective/%s online",
   "campaign.lasttrain.status.not_started": "Not started",
   "campaign.lasttrain.status.running": "Running",
   "campaign.lasttrain.status.completed": "Completed",

@@ -54,6 +54,9 @@ public final class CampaignSavedData extends SavedData {
     private boolean starterTrainAssembled;
     private UUID starterTrainSublevelId;
     private int starterTrainAssemblyAttempts;
+    private int effectivePlayers = PopulationScalingPolicy.MIN_PLAYERS;
+    private int pendingPlayers = PopulationScalingPolicy.MIN_PLAYERS;
+    private int scalingHoldTicks;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
 
@@ -108,6 +111,11 @@ public final class CampaignSavedData extends SavedData {
             }
         }
         data.starterTrainAssemblyAttempts = Math.max(0, tag.getInt("starter_train_assembly_attempts"));
+        data.effectivePlayers = PopulationScalingPolicy.clampPlayers(
+                tag.getInt("scaling_effective_players"));
+        data.pendingPlayers = PopulationScalingPolicy.clampPlayers(
+                tag.getInt("scaling_pending_players"));
+        data.scalingHoldTicks = Math.max(0, tag.getInt("scaling_hold_ticks"));
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         data.migrateFinaleState(loadedSchema);
@@ -143,6 +151,9 @@ public final class CampaignSavedData extends SavedData {
             tag.putString("starter_train_sublevel_id", starterTrainSublevelId.toString());
         }
         tag.putInt("starter_train_assembly_attempts", starterTrainAssemblyAttempts);
+        tag.putInt("scaling_effective_players", effectivePlayers);
+        tag.putInt("scaling_pending_players", pendingPlayers);
+        tag.putInt("scaling_hold_ticks", scalingHoldTicks);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
         return tag;
@@ -197,6 +208,23 @@ public final class CampaignSavedData extends SavedData {
         }
     }
 
+    private void observeActivePlayers(int activePlayers) {
+        PopulationScalingPolicy.Hysteresis next = PopulationScalingPolicy.observe(
+                new PopulationScalingPolicy.Hysteresis(
+                        effectivePlayers,
+                        pendingPlayers,
+                        scalingHoldTicks),
+                activePlayers);
+        if (next.effectivePlayers() != effectivePlayers
+                || next.pendingPlayers() != pendingPlayers
+                || next.holdTicks() != scalingHoldTicks) {
+            effectivePlayers = next.effectivePlayers();
+            pendingPlayers = next.pendingPlayers();
+            scalingHoldTicks = next.holdTicks();
+            setDirty();
+        }
+    }
+
     public boolean start() {
         if (status != CampaignStatus.NOT_STARTED) {
             return false;
@@ -207,6 +235,10 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public TickOutcome tick() {
+        return tick(effectivePlayers);
+    }
+
+    public TickOutcome tick(int activePlayers) {
         if (status != CampaignStatus.RUNNING) {
             return TickOutcome.NONE;
         }
@@ -220,6 +252,7 @@ public final class CampaignSavedData extends SavedData {
             return TickOutcome.NONE;
         }
 
+        observeActivePlayers(activePlayers);
         totalActiveTicks++;
         activeTicksIntoDay++;
         if ((totalActiveTicks % 200L) == 0L) {
@@ -311,11 +344,16 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean createMission(MissionType type) {
+        return createMission(type, effectivePlayers);
+    }
+
+    public boolean createMission(MissionType type, int teamSize) {
         if (!FinalePolicy.allowsOrdinaryMission(status, day)
                 || activeMission != null) {
             return false;
         }
-        activeMission = ActiveMission.create(type, day, routeSegment);
+        int target = PopulationScalingPolicy.missionTarget(type, teamSize);
+        activeMission = ActiveMission.create(type, day, routeSegment, target);
         missionSequence++;
         setDirty();
         return true;
@@ -547,6 +585,10 @@ public final class CampaignSavedData extends SavedData {
 
     public int threat() {
         return threat;
+    }
+
+    public int effectivePlayers() {
+        return effectivePlayers;
     }
 
     public ActiveMission activeMission() {

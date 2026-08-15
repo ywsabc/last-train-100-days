@@ -68,6 +68,10 @@ public final class LastTrainCommands {
 
     private static int status(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        int onlinePlayers = (int) context.getSource().getServer().getPlayerList()
+                .getPlayers().stream()
+                .filter(player -> !player.isSpectator())
+                .count();
         context.getSource().sendSuccess(
                 () -> Component.translatable(
                         "command.lasttrain.status",
@@ -75,7 +79,9 @@ public final class LastTrainCommands {
                         CampaignSavedData.FINAL_DAY,
                         data.status().name(),
                         data.routeSegment(),
-                        data.threat()),
+                        data.threat(),
+                        data.effectivePlayers(),
+                        onlinePlayers),
                 false);
         return data.day();
     }

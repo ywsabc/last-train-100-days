@@ -38,9 +38,10 @@ public final class CampaignEvents {
         RouteDirector.tick(server, data, server.getTickCount());
         MissionWorldDirector.tick(server, data, server.getTickCount());
 
-        boolean hasActivePlayer = server.getPlayerList().getPlayers().stream()
-                .anyMatch(player -> !player.isSpectator());
-        if (!hasActivePlayer) {
+        int activePlayers = (int) server.getPlayerList().getPlayers().stream()
+                .filter(player -> !player.isSpectator())
+                .count();
+        if (activePlayers == 0) {
             return;
         }
 
@@ -49,7 +50,7 @@ public final class CampaignEvents {
             boolean trainLocated = trainId != null
                     && SableTrainTracker.position(server.overworld(), trainId).isPresent();
             if (CampaignStartPolicy.shouldAutoStart(
-                            true,
+                            activePlayers > 0,
                             data.starterStationBuilt(),
                             data.starterTrainAssembled(),
                             trainId != null,
@@ -60,8 +61,9 @@ public final class CampaignEvents {
             }
         }
 
-        CampaignSavedData.TickOutcome outcome = data.tick();
-        if (outcome != CampaignSavedData.TickOutcome.NONE) {
+        CampaignSavedData.TickOutcome outcome = data.tick(activePlayers);
+        if (outcome != CampaignSavedData.TickOutcome.NONE
+                || server.getTickCount() % 200 == 0) {
             IntegrationBridge.syncCampaignNumbers(server, data);
         }
         switch (outcome) {

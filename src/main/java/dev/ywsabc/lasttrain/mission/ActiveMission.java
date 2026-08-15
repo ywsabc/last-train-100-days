@@ -47,6 +47,33 @@ public final class ActiveMission {
             MissionType type,
             int day,
             int routeSegment) {
+        return create(
+                id,
+                type,
+                day,
+                routeSegment,
+                type.defaultTarget());
+    }
+
+    public static ActiveMission create(
+            MissionType type,
+            int day,
+            int routeSegment,
+            int target) {
+        return create(
+                UUID.randomUUID(),
+                type,
+                day,
+                routeSegment,
+                target);
+    }
+
+    public static ActiveMission create(
+            UUID id,
+            MissionType type,
+            int day,
+            int routeSegment,
+            int target) {
         return new ActiveMission(
                 id,
                 type,
@@ -54,7 +81,7 @@ public final class ActiveMission {
                 day,
                 routeSegment,
                 0,
-                type.defaultTarget(),
+                target,
                 null,
                 false);
     }

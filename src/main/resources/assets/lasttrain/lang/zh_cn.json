@@ -12,7 +12,7 @@
   "command.lasttrain.mission.status": "任务：%s — %s/%s，线路区段 %s，阶段 %s",
   "command.lasttrain.route_advanced": "线路已推进至区段 %s。",
   "command.lasttrain.started": "“末班列车：百日惊变”战役开始。",
-  "command.lasttrain.status": "第 %s/%s 天 — %s — 线路 %s — 威胁度 %s",
+  "command.lasttrain.status": "第 %s/%s 天 — %s — 线路 %s — 威胁度 %s — 有效人数 %s/在线 %s",
   "campaign.lasttrain.status.not_started": "未开始",
   "campaign.lasttrain.status.running": "进行中",
   "campaign.lasttrain.status.completed": "已完成",
