@@ -34,7 +34,6 @@
 - 把城市和任务锚点附着到已确认的线路节点；
 - 为断轨任务区分“剧情断轨”和“生成错误”。
 
-<<<<<<< HEAD
 ## 汽鸣铁道（Create: Steam 'n' Rails）
 
 [汽鸣铁道](https://www.mcmod.cn/class/6619.html) 是 Create 的铁路扩展。
