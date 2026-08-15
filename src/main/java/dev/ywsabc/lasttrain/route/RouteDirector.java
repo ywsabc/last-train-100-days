@@ -81,6 +81,11 @@ public final class RouteDirector {
                     desiredSegment,
                     RouteGeometry.missionSegment(mission.routeSegment()));
         }
+        if (data.finaleHubRouteSegment() > 0) {
+            // Once the final window is reserved, materialize through the
+            // announced hub even before the day-100 mission is instantiated.
+            desiredSegment = Math.max(desiredSegment, data.finaleHubRouteSegment());
+        }
         desiredSegment = Math.min(CampaignSavedData.MAX_ROUTE_SEGMENT, desiredSegment);
 
         int nextSegment = data.generatedRouteSegment() + 1;

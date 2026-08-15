@@ -11,8 +11,10 @@ import java.util.UUID;
  * two completion gates explicit and straightforward to regression test.</p>
  */
 public final class FinalePolicy {
-    public static final int CURRENT_SCHEMA = 6;
+    public static final int CURRENT_SCHEMA = 7;
     public static final int FINAL_DAY = 100;
+    public static final int FINALE_HUB_START_DAY = 90;
+    public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;
     private static final String FINALE_ID_NAMESPACE = "lasttrain:finale:";
 
     private FinalePolicy() {
@@ -40,6 +42,54 @@ public final class FinalePolicy {
         return status == CampaignStatus.RUNNING && day < FINAL_DAY;
     }
 
+    /** Ordinary mainline roadblocks stop competing for the finale window on day 90. */
+    public static boolean allowsOrdinaryMainlineMission(CampaignStatus status, int day) {
+        return status == CampaignStatus.RUNNING
+                && day < FINALE_HUB_START_DAY;
+    }
+
+    public static boolean finaleHubWindowOpen(CampaignStatus status, int day) {
+        return status == CampaignStatus.RUNNING && day >= FINALE_HUB_START_DAY;
+    }
+
+    /** Returns the finite, strictly-forward hub reservation window. */
+    public static HubWindow finaleHubWindow(int currentRouteSegment) {
+        int current = Math.max(0, currentRouteSegment);
+        return new HubWindow(
+                current + 1,
+                current + FINALE_HUB_WINDOW_SEGMENTS);
+    }
+
+    public static boolean isFinaleHubInForwardWindow(
+            int currentRouteSegment,
+            int finaleHubRouteSegment) {
+        HubWindow window = finaleHubWindow(currentRouteSegment);
+        return finaleHubRouteSegment >= window.firstSegment()
+                && finaleHubRouteSegment <= window.lastSegment();
+    }
+
+    /**
+     * Picks a stable location in the current forward window. The campaign UUID
+     * makes the choice stable across restarts while the current route keeps a
+     * stale/explored segment from being reused.
+     */
+    public static int chooseFinaleHubSegment(
+            UUID campaignId,
+            int currentRouteSegment) {
+        UUID id = java.util.Objects.requireNonNull(campaignId, "campaignId");
+        HubWindow window = finaleHubWindow(currentRouteSegment);
+        long mixed = id.getMostSignificantBits()
+                ^ Long.rotateLeft(id.getLeastSignificantBits(), 17)
+                ^ (long) Math.max(0, currentRouteSegment) * 0x9E3779B97F4A7C15L;
+        mixed ^= mixed >>> 30;
+        mixed *= 0xBF58476D1CE4E5B9L;
+        mixed ^= mixed >>> 27;
+        mixed *= 0x94D049BB133111EBL;
+        mixed ^= mixed >>> 31;
+        int span = window.lastSegment() - window.firstSegment() + 1;
+        return window.firstSegment() + Math.floorMod(mixed, span);
+    }
+
     public static UUID missionId(UUID campaignId) {
         return UUID.nameUUIDFromBytes(
                 (FINALE_ID_NAMESPACE + campaignId)
@@ -57,7 +107,7 @@ public final class FinalePolicy {
         boolean migratedElapsed = finalDayElapsed;
         boolean migratedMissionCompleted = finaleMissionCompleted;
 
-        if (loadedSchema < CURRENT_SCHEMA) {
+        if (loadedSchema < 6) {
             // Schema 5 only reached COMPLETED after its final-day timer path.
             // Preserve that elapsed-time achievement but require the new
             // finale mission before considering the campaign complete again.
@@ -80,6 +130,14 @@ public final class FinalePolicy {
                 migratedStatus,
                 migratedElapsed,
                 migratedMissionCompleted);
+    }
+
+    public record HubWindow(int firstSegment, int lastSegment) {
+        public HubWindow {
+            if (firstSegment < 1 || lastSegment < firstSegment) {
+                throw new IllegalArgumentException("Finale hub window must be forward and non-empty");
+            }
+        }
     }
 
     public enum Directive {

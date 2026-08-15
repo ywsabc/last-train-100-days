@@ -96,6 +96,78 @@ class CampaignSavedDataFinaleTest {
         assertEquals(data.finaleMissionId().toString(), migrated.getString("finale_mission_id"));
     }
 
+    @Test
+    void dayNinetyReservesAFinaleHubInTheForwardWindowAndPersistsItsLocation() {
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        assertTrue(data.advanceRoute(12));
+        data.advanceDays(FinalePolicy.FINALE_HUB_START_DAY - 1);
+
+        data.tick();
+
+        assertEquals(FinalePolicy.FINALE_HUB_START_DAY, data.day());
+        assertTrue(data.finaleHubRouteSegment() > data.routeSegment());
+        assertTrue(
+                FinalePolicy.isFinaleHubInForwardWindow(
+                        data.routeSegment(),
+                        data.finaleHubRouteSegment()));
+
+        CampaignSavedData loaded = CampaignSavedData.load(
+                data.save(new CompoundTag(), null),
+                null);
+        assertEquals(data.finaleHubRouteSegment(), loaded.finaleHubRouteSegment());
+    }
+
+    @Test
+    void dayNinetyStopsNewMainlineObstaclesButKeepsOptionalSupplyMissionsAvailable() {
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        data.advanceDays(FinalePolicy.FINALE_HUB_START_DAY - 1);
+        data.clearMission();
+
+        assertFalse(data.createMission(MissionType.RAIL_BREAK));
+        assertTrue(data.createMission(MissionType.SUPPLY_RECOVERY));
+    }
+
+    @Test
+    void finaleWaitsForActiveMainlineButAProposedOfferCannotBlockCreation() {
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        assertTrue(data.createMission(MissionType.RAIL_BREAK));
+        data.advanceDays(CampaignSavedData.FINAL_DAY - 1);
+
+        assertEquals(CampaignSavedData.TickOutcome.NONE, data.tick());
+        assertNotNull(data.activeMission());
+        assertNull(data.proposedMission());
+
+        assertTrue(data.clearMission());
+        assertTrue(data.proposeMission(MissionType.SUPPLY_RECOVERY));
+        assertEquals(
+                CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED,
+                data.tick());
+        assertNull(data.proposedMission());
+        assertTrue(data.isFinaleMission(data.activeMission()));
+        assertEquals(
+                data.finaleHubRouteSegment(),
+                data.activeMission().routeSegment());
+    }
+
+    @Test
+    void legacySaveWithoutP4FieldsUsesSafeDefaults() {
+        CompoundTag old = new CompoundTag();
+        old.putInt("schema_version", 6);
+        old.putString("campaign_id", UUID.randomUUID().toString());
+        old.putString("status", CampaignStatus.RUNNING.name());
+        old.putInt("day", FinalePolicy.FINALE_HUB_START_DAY - 1);
+        old.putInt("route_segment", 9);
+
+        CampaignSavedData loaded = CampaignSavedData.load(old, null);
+
+        assertEquals(0, loaded.finaleHubRouteSegment());
+        assertNull(loaded.proposedMission());
+        assertTrue(loaded.scheduledKeyMissions().isEmpty());
+    }
+
     private static void finishActiveMission(CampaignSavedData data) {
         ActiveMission mission = data.activeMission();
         assertNotNull(mission);
