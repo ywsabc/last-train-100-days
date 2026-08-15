@@ -134,14 +134,15 @@ class CampaignSavedDataFinaleTest {
         CampaignSavedData data = new CampaignSavedData();
         assertTrue(data.start());
         assertTrue(data.createMission(MissionType.RAIL_BREAK));
-        data.advanceDays(CampaignSavedData.FINAL_DAY - 1);
+        data.advanceDays(CampaignSavedData.FINAL_DAY - 2);
 
         assertEquals(CampaignSavedData.TickOutcome.NONE, data.tick());
         assertNotNull(data.activeMission());
         assertNull(data.proposedMission());
 
         assertTrue(data.clearMission());
-        assertTrue(data.proposeMission(MissionType.SUPPLY_RECOVERY));
+        assertTrue(data.proposeOptionalMission(MissionType.SALVAGE_CAR));
+        data.advanceDays(1);
         assertEquals(
                 CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED,
                 data.tick());

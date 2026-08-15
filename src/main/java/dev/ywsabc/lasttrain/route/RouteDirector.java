@@ -86,6 +86,13 @@ public final class RouteDirector {
             // announced hub even before the day-100 mission is instantiated.
             desiredSegment = Math.max(desiredSegment, data.finaleHubRouteSegment());
         }
+        for (ActiveMission optional : data.optionalMissions()) {
+            if (optional.site() == null) {
+                desiredSegment = Math.max(
+                        desiredSegment,
+                        RouteGeometry.missionSegment(optional.routeSegment()));
+            }
+        }
         desiredSegment = Math.min(CampaignSavedData.MAX_ROUTE_SEGMENT, desiredSegment);
 
         int nextSegment = data.generatedRouteSegment() + 1;
@@ -108,6 +115,21 @@ public final class RouteDirector {
                 0);
     }
 
+    /**
+     * The route checkpoint of a mission, or null when it must not hold the
+     * train: only an ACTIVE route-blocking mainline mission locks progress.
+     * Optional missions and PROPOSED offers never block the main line, and a
+     * READY mainline mission has already resolved its physical barrier.
+     */
+    public static Integer blockingCheckpoint(ActiveMission mission) {
+        if (mission == null
+                || mission.stage() != dev.ywsabc.lasttrain.mission.MissionStage.ACTIVE
+                || !mission.type().blocksRoute()) {
+            return null;
+        }
+        return mission.routeSegment();
+    }
+
     private static int occupiedSegment(ServerLevel level, CampaignSavedData data) {
         if (!data.starterTrainAssembled() || data.starterTrainSublevelId() == null) {
             return data.routeSegment();
@@ -123,15 +145,14 @@ public final class RouteDirector {
         int stationX = data.starterStationAnchor().getX();
         int offset = (int) Math.floor(trainPosition.orElseThrow().x) - stationX;
         int observed = RouteGeometry.segmentForOffset(offset);
-        ActiveMission mission = data.activeMission();
-        // Every mission is a route checkpoint. The train, not a player on foot
-        // or an admin teleport, must clear it before progression can move past
-        // the segment where it was issued.
+        // Every ACTIVE route-blocking mainline mission is a route checkpoint.
+        // The train, not a player on foot or an admin teleport, must clear it
+        // before progression can move past the segment where it was issued.
         return RouteProgressPolicy.nextSegment(
                 data.routeSegment(),
                 data.generatedRouteSegment(),
                 observed,
-                mission == null ? null : mission.routeSegment());
+                blockingCheckpoint(data.activeMission()));
     }
 
     private static boolean generateSegment(

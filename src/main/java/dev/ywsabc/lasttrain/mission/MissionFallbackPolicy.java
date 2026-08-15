@@ -22,6 +22,8 @@ public final class MissionFallbackPolicy {
             case STATION_GATE -> 4;
             case SUPPLY_RECOVERY -> 3;
             case ZOMBIE_BLOCKADE -> 5;
+            case RESCUE_SURVIVOR -> OptionalMissionPolicy.RESCUE_GRACE_DAYS;
+            case SALVAGE_CAR -> OptionalMissionPolicy.SALVAGE_GRACE_DAYS;
         };
     }
 

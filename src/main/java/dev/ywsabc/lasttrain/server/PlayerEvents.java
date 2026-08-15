@@ -47,6 +47,7 @@ public final class PlayerEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(player.getServer());
+        data.registerTeamMember(player.getUUID());
         issueStarterSupplies(player, data);
         sendCampaignSummary(player, data);
         enqueueReturn(player);

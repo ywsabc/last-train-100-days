@@ -2,11 +2,20 @@ package dev.ywsabc.lasttrain.campaign;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionPoolPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
+import dev.ywsabc.lasttrain.mission.OptionalMissionPolicy;
+import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.UUID;
@@ -31,6 +40,9 @@ public final class CampaignSavedData extends SavedData {
     public static final int FINAL_DAY = FinalePolicy.FINAL_DAY;
     public static final int DEFAULT_ACTIVE_TICKS_PER_DAY = 24_000;
     public static final int MAX_ROUTE_SEGMENT = 400_000;
+    public static final int MAX_OPTIONAL_MISSIONS_ON_LOAD = 8;
+    public static final int MAX_PENDING_CLEANUPS = 64;
+    public static final int MAX_TEAM_MEMBERS = 128;
     private static final String DATA_NAME = LastTrain.MOD_ID + "_campaign";
     private static final Factory<CampaignSavedData> FACTORY =
             new Factory<>(CampaignSavedData::new, CampaignSavedData::load);
@@ -50,7 +62,6 @@ public final class CampaignSavedData extends SavedData {
     private CampaignPacingPolicy.KeyMission activeKeyMission;
     private final Set<CampaignPacingPolicy.KeyMission> scheduledKeyMissions =
             EnumSet.noneOf(CampaignPacingPolicy.KeyMission.class);
-    private ProposedMission proposedMission;
     private UUID finaleMissionId;
     private int finaleHubRouteSegment;
     private boolean finaleMissionCompleted;
@@ -71,6 +82,13 @@ public final class CampaignSavedData extends SavedData {
     private int attention = PursuitPolicy.INITIAL_ATTENTION;
     private int pursuitDistance = PursuitPolicy.INITIAL_PURSUIT_DISTANCE;
     private int lastPursuitRouteSegment;
+    private ActiveMission proposedMission;
+    private final List<ActiveMission> optionalMissions = new ArrayList<>();
+    private final Map<UUID, RewardReceipt> rewardReceipts = new LinkedHashMap<>();
+    private final List<PendingSiteCleanup> pendingSiteCleanups = new ArrayList<>();
+    private final List<MissionPoolPolicy.Entry> missionHistory = new ArrayList<>();
+    private final Set<UUID> teamMembers = new LinkedHashSet<>();
+    private UUID captainId;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
 
@@ -107,9 +125,6 @@ public final class CampaignSavedData extends SavedData {
             data.activeKeyMission = parseKeyMission(tag.getString("active_key_mission"));
         }
         loadKeyMissionSet(tag, "scheduled_key_missions", data.scheduledKeyMissions);
-        if (tag.contains("proposed_mission")) {
-            data.proposedMission = loadProposedMission(tag.getCompound("proposed_mission"));
-        }
         if (tag.contains("finale_mission_id")) {
             try {
                 data.finaleMissionId = UUID.fromString(tag.getString("finale_mission_id"));
@@ -173,6 +188,7 @@ public final class CampaignSavedData extends SavedData {
                 : data.routeSegment;
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
+        loadOptionalState(tag, registries, data);
         data.migrateFinaleState(loadedSchema);
         return data;
     }
@@ -197,9 +213,6 @@ public final class CampaignSavedData extends SavedData {
             tag.putString("active_key_mission", activeKeyMission.name());
         }
         tag.put("scheduled_key_missions", saveKeyMissionSet(scheduledKeyMissions));
-        if (proposedMission != null) {
-            tag.put("proposed_mission", proposedMission.save());
-        }
         if (finaleMissionId != null) {
             tag.putString("finale_mission_id", finaleMissionId.toString());
         }
@@ -226,7 +239,149 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("last_pursuit_route_segment", lastPursuitRouteSegment);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
+        saveOptionalState(tag, registries);
         return tag;
+    }
+
+    /**
+     * Loads the optional-mission state added in schema 7. All collections are
+     * capped during deserialization; missing keys keep safe empty defaults so
+     * every older save loads unchanged. Reward receipts over the cap drop
+     * oldest {@link RewardOutboxPolicy.ReceiptState#CLAIMED} entries first and
+     * never evict an undelivered PENDING receipt.
+     */
+    private static void loadOptionalState(
+            CompoundTag tag,
+            HolderLookup.Provider registries,
+            CampaignSavedData data) {
+        if (tag.contains("proposed_mission")) {
+            ActiveMission proposed =
+                    ActiveMission.load(tag.getCompound("proposed_mission"), registries);
+            if (proposed.stage() == MissionStage.PROPOSED) {
+                data.proposedMission = proposed;
+            }
+        }
+        ListTag missions = tag.getList("optional_missions", Tag.TAG_COMPOUND);
+        for (int index = 0; index < missions.size(); index++) {
+            if (data.optionalMissions.size() >= MAX_OPTIONAL_MISSIONS_ON_LOAD) {
+                LastTrain.LOGGER.warn(
+                        "Optional mission list exceeded the load cap of {}; "
+                                + "extra entries were dropped",
+                        MAX_OPTIONAL_MISSIONS_ON_LOAD);
+                break;
+            }
+            ActiveMission mission = ActiveMission.load(missions.getCompound(index), registries);
+            if (mission.stage().terminal() || mission.stage() == MissionStage.PROPOSED) {
+                // Terminal missions belong to history/cleanup; a PROPOSED
+                // stage in the optional list is corrupt data and is dropped.
+                continue;
+            }
+            data.optionalMissions.add(mission);
+        }
+        loadRewardReceipts(tag, data);
+        ListTag cleanups = tag.getList("pending_cleanups", Tag.TAG_COMPOUND);
+        for (int index = 0; index < cleanups.size(); index++) {
+            if (data.pendingSiteCleanups.size() >= MAX_PENDING_CLEANUPS) {
+                break;
+            }
+            PendingSiteCleanup cleanup = PendingSiteCleanup.load(cleanups.getCompound(index));
+            if (cleanup != null) {
+                data.pendingSiteCleanups.add(cleanup);
+            }
+        }
+        ListTag history = tag.getList("mission_history", Tag.TAG_COMPOUND);
+        for (int index = 0; index < history.size(); index++) {
+            MissionPoolPolicy.Entry entry = loadHistoryEntry(history.getCompound(index));
+            if (entry != null) {
+                data.missionHistory.add(entry);
+            }
+        }
+        while (data.missionHistory.size() > MissionPoolPolicy.HISTORY_LIMIT) {
+            data.missionHistory.remove(0);
+        }
+        ListTag members = tag.getList("team_members", Tag.TAG_STRING);
+        for (int index = 0; index < members.size(); index++) {
+            if (data.teamMembers.size() >= MAX_TEAM_MEMBERS) {
+                break;
+            }
+            try {
+                data.teamMembers.add(UUID.fromString(members.getString(index)));
+            } catch (IllegalArgumentException ignored) {
+                // Ignore malformed entries rather than making the save unloadable.
+            }
+        }
+        if (tag.contains("captain_id")) {
+            try {
+                data.captainId = UUID.fromString(tag.getString("captain_id"));
+            } catch (IllegalArgumentException ignored) {
+                data.captainId = null;
+            }
+        }
+    }
+
+    private static void loadRewardReceipts(CompoundTag tag, CampaignSavedData data) {
+        ListTag receipts = tag.getList("reward_receipts", Tag.TAG_COMPOUND);
+        for (int index = 0; index < receipts.size(); index++) {
+            RewardReceipt receipt = RewardReceipt.load(receipts.getCompound(index));
+            if (receipt != null) {
+                data.putRewardReceipt(receipt);
+            }
+        }
+        // Hard deserialization cap: a corrupt save cannot grow the receipt
+        // map without bound. Oldest CLAIMED entries go first; only when a
+        // save has more than 256 undelivered PENDING entries (impossible in
+        // normal play) are excess PENDING entries dropped as a last resort.
+        while (data.rewardReceipts.size() > RewardOutboxPolicy.MAX_RECEIPTS) {
+            UUID victim = data.oldestClaimedReceiptId();
+            if (victim == null) {
+                victim = data.rewardReceipts.keySet().iterator().next();
+            }
+            data.rewardReceipts.remove(victim);
+        }
+    }
+
+    private static MissionPoolPolicy.Entry loadHistoryEntry(CompoundTag tag) {
+        MissionType type = MissionType.parse(tag.getString("type")).orElse(null);
+        if (type == null) {
+            return null;
+        }
+        String rawOutcome = tag.getString("outcome");
+        for (MissionPoolPolicy.Outcome outcome : MissionPoolPolicy.Outcome.values()) {
+            if (outcome.name().equals(rawOutcome)) {
+                return new MissionPoolPolicy.Entry(type, tag.getBoolean("mainline"), outcome);
+            }
+        }
+        return null;
+    }
+
+    private void saveOptionalState(CompoundTag tag, HolderLookup.Provider registries) {
+        if (proposedMission != null) {
+            tag.put("proposed_mission", proposedMission.save(registries));
+        }
+        ListTag missions = new ListTag();
+        for (ActiveMission mission : optionalMissions) {
+            missions.add(mission.save(registries));
+        }
+        tag.put("optional_missions", missions);
+        ListTag receipts = new ListTag();
+        rewardReceipts.values().forEach(receipt -> receipts.add(receipt.save()));
+        tag.put("reward_receipts", receipts);
+        ListTag cleanups = new ListTag();
+        pendingSiteCleanups.forEach(cleanup -> cleanups.add(cleanup.save()));
+        tag.put("pending_cleanups", cleanups);
+        ListTag history = new ListTag();
+        for (MissionPoolPolicy.Entry entry : missionHistory) {
+            CompoundTag entryTag = new CompoundTag();
+            entryTag.putString("type", entry.type().serializedName());
+            entryTag.putBoolean("mainline", entry.mainline());
+            entryTag.putString("outcome", entry.outcome().name());
+            history.add(entryTag);
+        }
+        tag.put("mission_history", history);
+        tag.put("team_members", saveUuidSet(teamMembers));
+        if (captainId != null) {
+            tag.putString("captain_id", captainId.toString());
+        }
     }
 
     private static void loadUuidSet(CompoundTag tag, String key, Set<UUID> target) {
@@ -283,15 +438,6 @@ public final class CampaignSavedData extends SavedData {
         } catch (IllegalArgumentException ignored) {
             return null;
         }
-    }
-
-    private static ProposedMission loadProposedMission(CompoundTag tag) {
-        return MissionType.parse(tag.getString("type"))
-                .map(type -> new ProposedMission(
-                        type,
-                        Math.max(1, tag.getInt("created_day")),
-                        Math.max(0, tag.getInt("route_segment"))))
-                .orElse(null);
     }
 
     private void migrateFinaleState(int loadedSchema) {
@@ -543,7 +689,9 @@ public final class CampaignSavedData extends SavedData {
                 || !FinalePolicy.allowsOrdinaryMission(status, day)
                 || (CampaignPacingPolicy.isMainlineMission(type)
                         && !FinalePolicy.allowsOrdinaryMainlineMission(status, day))
-                || activeMission != null) {
+                || activeMission != null
+                || type.category() != MissionType.Category.MAIN
+                || !MissionPoolPolicy.mayCreateMainline(missionHistory, type)) {
             return false;
         }
         int target = PopulationScalingPolicy.missionTarget(type, teamSize);
@@ -576,28 +724,6 @@ public final class CampaignSavedData extends SavedData {
                         keyMission,
                         day,
                         routeSegment);
-    }
-
-    /** Adds a P3-style unaccepted proposal; proposals never consume the active mission slot. */
-    public boolean proposeMission(MissionType type) {
-        if (type == null
-                || status != CampaignStatus.RUNNING
-                || activeMission != null
-                || proposedMission != null) {
-            return false;
-        }
-        proposedMission = new ProposedMission(type, day, routeSegment);
-        setDirty();
-        return true;
-    }
-
-    public boolean clearProposedMission() {
-        if (proposedMission == null) {
-            return false;
-        }
-        proposedMission = null;
-        setDirty();
-        return true;
     }
 
     public boolean addMissionProgress(int amount) {
@@ -641,6 +767,7 @@ public final class CampaignSavedData extends SavedData {
         activeMission.complete();
         activeMission = null;
         activeKeyMission = null;
+        recordMissionOutcome(completedType, MissionPoolPolicy.Outcome.COMPLETED);
         if (finale) {
             finaleMissionCompleted = true;
             // Command turn-in also runs on the logical server thread. Resolve
@@ -682,6 +809,7 @@ public final class CampaignSavedData extends SavedData {
         activeMission = null;
         activeKeyMission = null;
         threat = Math.min(100, threat + Math.max(0, threatPenalty));
+        recordMissionOutcome(failedType, MissionPoolPolicy.Outcome.FAILED);
         if (failedType == MissionType.ZOMBIE_BLOCKADE) {
             pursuitDistance = Math.max(
                     pursuitDistance,
@@ -689,6 +817,383 @@ public final class CampaignSavedData extends SavedData {
         }
         setDirty();
         return true;
+    }
+
+    /**
+     * Director-side proposal of an optional mission. Proposals never occupy
+     * the mainline slot, never block route progress, and carry an absolute
+     * tick deadline captured from the current active-tick counter.
+     */
+    public boolean proposeOptionalMission(MissionType type) {
+        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+                || proposedMission != null
+                || activeOptionalCount() >= OptionalMissionPolicy.MAX_ACTIVE_OPTIONAL_MISSIONS
+                || !OptionalMissionPolicy.isOptional(type)) {
+            return false;
+        }
+        proposedMission =
+                ActiveMission.createProposal(type, day, routeSegment, totalActiveTicks);
+        setDirty();
+        return true;
+    }
+
+    /**
+     * Authoritative accept/reject of the current proposal. The caller may
+     * pass the task id and/or revision shown by an earlier status command;
+     * both are compared against the live proposal right before the change so
+     * a stale UI or a concurrent answer cannot affect the wrong task.
+     */
+    public ProposalAnswer acceptProposal(UUID givenId, Integer givenRevision) {
+        ProposalAnswer check = checkProposal(givenId, givenRevision);
+        if (check != ProposalAnswer.OK_FOR_APPLY) {
+            return check;
+        }
+        if (activeOptionalCount() >= OptionalMissionPolicy.MAX_ACTIVE_OPTIONAL_MISSIONS) {
+            return ProposalAnswer.SLOTS_FULL;
+        }
+        ActiveMission proposal = proposedMission;
+        proposal.transitionTo(MissionStage.ACTIVE);
+        optionalMissions.add(proposal);
+        proposedMission = null;
+        setDirty();
+        return ProposalAnswer.ACCEPTED;
+    }
+
+    public ProposalAnswer rejectProposal(UUID givenId, Integer givenRevision) {
+        ProposalAnswer check = checkProposal(givenId, givenRevision);
+        if (check != ProposalAnswer.OK_FOR_APPLY) {
+            return check;
+        }
+        ActiveMission proposal = proposedMission;
+        proposal.transitionTo(MissionStage.SKIPPED);
+        proposedMission = null;
+        recordMissionOutcome(proposal.type(), MissionPoolPolicy.Outcome.SKIPPED);
+        setDirty();
+        return ProposalAnswer.SKIPPED;
+    }
+
+    private ProposalAnswer checkProposal(UUID givenId, Integer givenRevision) {
+        if (proposedMission == null) {
+            return ProposalAnswer.NOT_FOUND;
+        }
+        if (proposedMission.stage() != MissionStage.PROPOSED) {
+            return ProposalAnswer.WRONG_STAGE;
+        }
+        if (givenId != null && !givenId.equals(proposedMission.id())) {
+            return ProposalAnswer.STALE_ID;
+        }
+        if (givenRevision != null && givenRevision != proposedMission.revision()) {
+            return ProposalAnswer.STALE_REVISION;
+        }
+        return ProposalAnswer.OK_FOR_APPLY;
+    }
+
+    /**
+     * Abandons an active optional mission. Settles state first, without any
+     * world access, and queues an idempotent site cleanup that runs when the
+     * site chunk loads again — an unloaded chunk can never strand the slot.
+     */
+    public OptionalSkipResult skipOptionalMission(UUID givenId, Integer givenRevision) {
+        ActiveMission target = null;
+        if (givenId != null) {
+            target = optionalMission(givenId).orElse(null);
+            if (target == null) {
+                return OptionalSkipResult.NOT_FOUND;
+            }
+        } else {
+            List<ActiveMission> skippable = optionalMissions.stream()
+                    .filter(mission -> mission.stage() == MissionStage.ACTIVE
+                            || mission.stage() == MissionStage.READY_TO_TURN_IN)
+                    .toList();
+            if (skippable.isEmpty()) {
+                return OptionalSkipResult.NOT_FOUND;
+            }
+            if (skippable.size() > 1) {
+                return OptionalSkipResult.AMBIGUOUS;
+            }
+            target = skippable.get(0);
+        }
+        if (target.stage() != MissionStage.ACTIVE
+                && target.stage() != MissionStage.READY_TO_TURN_IN) {
+            return OptionalSkipResult.WRONG_STAGE;
+        }
+        if (givenRevision != null && givenRevision != target.revision()) {
+            return OptionalSkipResult.STALE_REVISION;
+        }
+        target.transitionTo(MissionStage.SKIPPED);
+        optionalMissions.remove(target);
+        recordMissionOutcome(target.type(), MissionPoolPolicy.Outcome.SKIPPED);
+        queueOptionalCleanup(target);
+        setDirty();
+        return OptionalSkipResult.SKIPPED;
+    }
+
+    public ActiveMission proposedMission() {
+        return proposedMission;
+    }
+
+    public List<ActiveMission> optionalMissions() {
+        return List.copyOf(optionalMissions);
+    }
+
+    public Optional<ActiveMission> optionalMission(UUID id) {
+        return optionalMissions.stream()
+                .filter(mission -> mission.id().equals(id))
+                .findFirst();
+    }
+
+    public boolean assignOptionalMissionSite(UUID id, BlockPos site) {
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission == null || !mission.assignSite(site)) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    public boolean markOptionalMissionWorldPrepared(UUID id) {
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission == null || !mission.markWorldPrepared()) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    /** Deduplicated salvage repair accounting, keyed by unique damage index. */
+    public boolean recordSalvageRepair(UUID id, int index) {
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission == null
+                || mission.type() != MissionType.SALVAGE_CAR
+                || !mission.recordRepairIndex(index)) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    public boolean recordSurvivorRescued(UUID id) {
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission == null
+                || mission.type() != MissionType.RESCUE_SURVIVOR
+                || !mission.setObservedProgress(mission.target())) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    /**
+     * Objective completion gate for optional missions: persists the
+     * REWARD_PENDING receipt before any world mutation happens, then the
+     * reward dispatcher executes the crate fill and flips the receipt to
+     * CLAIMED. The outbox reconciles both crash orders afterwards.
+     */
+    public boolean completeOptionalMission(UUID id) {
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission == null || mission.stage() != MissionStage.READY_TO_TURN_IN) {
+            return false;
+        }
+        mission.transitionTo(MissionStage.REWARD_PENDING);
+        putRewardReceipt(new RewardReceipt(
+                id,
+                mission.type(),
+                RewardOutboxPolicy.ReceiptState.PENDING));
+        setDirty();
+        return true;
+    }
+
+    /** Marks the outbox receipt claimed and settles the mission record. */
+    public boolean markRewardClaimed(UUID id) {
+        RewardReceipt receipt = rewardReceipts.get(id);
+        if (receipt == null) {
+            return false;
+        }
+        if (receipt.state() != RewardOutboxPolicy.ReceiptState.CLAIMED) {
+            rewardReceipts.put(id, receipt.claimed());
+        }
+        ActiveMission mission = optionalMission(id).orElse(null);
+        if (mission != null && mission.stage() == MissionStage.REWARD_PENDING) {
+            mission.transitionTo(MissionStage.COMPLETED);
+            optionalMissions.remove(mission);
+            recordMissionOutcome(mission.type(), MissionPoolPolicy.Outcome.COMPLETED);
+            queueOptionalCleanup(mission);
+        }
+        setDirty();
+        return true;
+    }
+
+    public Optional<RewardReceipt> rewardReceipt(UUID id) {
+        return Optional.ofNullable(rewardReceipts.get(id));
+    }
+
+    public List<RewardReceipt> rewardReceipts() {
+        return List.copyOf(rewardReceipts.values());
+    }
+
+    /**
+     * Settles every expired proposal and active optional mission against the
+     * monotonic tick counter. Pure state change plus cleanup records — no
+     * chunk access — so timeouts settle even while the site is unloaded.
+     */
+    public int settleOptionalTimeouts() {
+        long now = totalActiveTicks;
+        int settled = 0;
+        for (ActiveMission mission : List.copyOf(optionalMissions)) {
+            if (mission.stage() == MissionStage.REWARD_PENDING
+                    || !OptionalMissionPolicy.shouldTimeout(mission.deadlineTick(), now)) {
+                continue;
+            }
+            failOptionalMission(mission);
+            settled++;
+        }
+        if (proposedMission != null
+                && OptionalMissionPolicy.shouldTimeout(proposedMission.deadlineTick(), now)) {
+            MissionType expired = proposedMission.type();
+            proposedMission.transitionTo(MissionStage.SKIPPED);
+            proposedMission = null;
+            recordMissionOutcome(expired, MissionPoolPolicy.Outcome.SKIPPED);
+            setDirty();
+            settled++;
+        }
+        return settled;
+    }
+
+    /**
+     * Day-100 finale protection: unanswered proposals are auto-rejected and
+     * unfinished optional missions are settled as failed. PENDING reward
+     * receipts are left alone so the outbox still delivers them.
+     */
+    public void settleOptionalMissionsAtFinale() {
+        boolean changed = false;
+        if (proposedMission != null) {
+            MissionType rejected = proposedMission.type();
+            proposedMission.transitionTo(MissionStage.SKIPPED);
+            proposedMission = null;
+            recordMissionOutcome(rejected, MissionPoolPolicy.Outcome.SKIPPED);
+            changed = true;
+        }
+        for (ActiveMission mission : List.copyOf(optionalMissions)) {
+            if (mission.stage() == MissionStage.REWARD_PENDING) {
+                continue;
+            }
+            failOptionalMission(mission);
+            changed = true;
+        }
+        if (changed) {
+            setDirty();
+        }
+    }
+
+    private void failOptionalMission(ActiveMission mission) {
+        mission.transitionTo(MissionStage.FAILED);
+        optionalMissions.remove(mission);
+        recordMissionOutcome(mission.type(), MissionPoolPolicy.Outcome.FAILED);
+        queueOptionalCleanup(mission);
+    }
+
+    public List<PendingSiteCleanup> pendingSiteCleanups() {
+        return List.copyOf(pendingSiteCleanups);
+    }
+
+    public boolean completePendingCleanup(UUID id) {
+        boolean removed = pendingSiteCleanups.removeIf(cleanup -> cleanup.missionId().equals(id));
+        if (removed) {
+            setDirty();
+        }
+        return removed;
+    }
+
+    /**
+     * Queues the site of a terminal optional mission for idempotent world
+     * cleanup. The queue is bounded; the oldest entry is dropped first when a
+     * corrupt save floods it, but normal operation never reaches the cap.
+     */
+    private void queueOptionalCleanup(ActiveMission mission) {
+        if (mission.site() == null) {
+            return;
+        }
+        if (pendingSiteCleanups.size() >= MAX_PENDING_CLEANUPS) {
+            LastTrain.LOGGER.warn(
+                    "Optional cleanup queue reached its cap of {}; dropping the oldest entry",
+                    MAX_PENDING_CLEANUPS);
+            pendingSiteCleanups.remove(0);
+        }
+        pendingSiteCleanups.add(new PendingSiteCleanup(
+                mission.id(),
+                mission.type(),
+                mission.site(),
+                mission.target()));
+    }
+
+    private int activeOptionalCount() {
+        return (int) optionalMissions.stream()
+                .filter(mission -> !mission.stage().terminal())
+                .count();
+    }
+
+    private void recordMissionOutcome(MissionType type, MissionPoolPolicy.Outcome outcome) {
+        missionHistory.add(MissionPoolPolicy.entry(type, outcome));
+        if (missionHistory.size() > MissionPoolPolicy.HISTORY_LIMIT) {
+            missionHistory.remove(0);
+        }
+    }
+
+    private void putRewardReceipt(RewardReceipt receipt) {
+        if (rewardReceipts.containsKey(receipt.missionId())) {
+            return;
+        }
+        while (rewardReceipts.size() >= RewardOutboxPolicy.MAX_RECEIPTS) {
+            UUID victim = oldestClaimedReceiptId();
+            if (victim == null) {
+                // Every entry is PENDING: an undelivered reward is never
+                // evicted, even if that briefly exceeds the cap.
+                break;
+            }
+            rewardReceipts.remove(victim);
+        }
+        rewardReceipts.put(receipt.missionId(), receipt);
+    }
+
+    private UUID oldestClaimedReceiptId() {
+        for (Map.Entry<UUID, RewardReceipt> entry : rewardReceipts.entrySet()) {
+            if (entry.getValue().state() == RewardOutboxPolicy.ReceiptState.CLAIMED) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    /** Team membership for command permission checks; first member is captain. */
+    public boolean registerTeamMember(UUID playerId) {
+        if (!teamMembers.add(playerId)) {
+            return false;
+        }
+        if (captainId == null) {
+            captainId = playerId;
+        }
+        setDirty();
+        return true;
+    }
+
+    public boolean isTeamMember(UUID playerId) {
+        return playerId != null && teamMembers.contains(playerId);
+    }
+
+    public boolean isCaptain(UUID playerId) {
+        return playerId != null && playerId.equals(captainId);
+    }
+
+    public Optional<MissionType> lastMainMissionType() {
+        return MissionPoolPolicy.lastMainlineType(missionHistory);
+    }
+
+    public int consecutiveFailures() {
+        return MissionPoolPolicy.consecutiveFailures(missionHistory);
+    }
+
+    public List<MissionPoolPolicy.Entry> missionHistory() {
+        return List.copyOf(missionHistory);
     }
 
     public boolean claimStarterKit(UUID playerId) {
@@ -849,11 +1354,19 @@ public final class CampaignSavedData extends SavedData {
         }
 
         SplittableRandom random = missionRandom(0x444159L);
+        boolean any = false;
         double chance = Math.min(0.85D, 0.30D + day * 0.004D);
-        if (random.nextDouble() >= chance) {
-            return false;
+        if (random.nextDouble() < chance) {
+            any = MissionPoolPolicy.selectMainMissionType(missionHistory, random)
+                    .map(this::createMission)
+                    .orElse(false);
         }
-        return createPacedMission(random);
+        if (random.nextDouble() < 0.45D) {
+            any |= MissionPoolPolicy.selectOptionalType(random)
+                    .map(this::proposeOptionalMission)
+                    .orElse(false);
+        }
+        return any;
     }
 
     private boolean tryGenerateRouteMission() {
@@ -927,7 +1440,10 @@ public final class CampaignSavedData extends SavedData {
         return switch (directive) {
             case NONE -> TickOutcome.NONE;
             case CREATE_FINALE_MISSION -> {
-                proposedMission = null;
+                // Day-100 protection: the finale can never be blocked by an
+                // unanswered optional proposal, and unfinished optional
+                // missions are settled before the finale starts.
+                settleOptionalMissionsAtFinale();
                 activeMission = ActiveMission.create(
                         ensureFinaleMissionId(),
                         MissionType.ZOMBIE_BLOCKADE,
@@ -1078,10 +1594,6 @@ public final class CampaignSavedData extends SavedData {
         return Set.copyOf(scheduledKeyMissions);
     }
 
-    public ProposedMission proposedMission() {
-        return proposedMission;
-    }
-
     public UUID finaleMissionId() {
         return finaleMissionId;
     }
@@ -1148,5 +1660,108 @@ public final class CampaignSavedData extends SavedData {
         FINAL_DAY_ELAPSED,
         SIEGE_TRIGGERED,
         CAMPAIGN_COMPLETED
+    }
+
+    /**
+     * Durable reward outbox entry. PENDING is persisted before the world
+     * mutation runs; the dispatcher flips it to CLAIMED afterwards and the
+     * world-side operation marker reconciles every crash order on restart.
+     */
+    public record RewardReceipt(
+            UUID missionId,
+            MissionType type,
+            RewardOutboxPolicy.ReceiptState state) {
+        public RewardReceipt claimed() {
+            return state == RewardOutboxPolicy.ReceiptState.CLAIMED
+                    ? this
+                    : new RewardReceipt(
+                            missionId,
+                            type,
+                            RewardOutboxPolicy.ReceiptState.CLAIMED);
+        }
+
+        static RewardReceipt load(CompoundTag tag) {
+            UUID id;
+            try {
+                id = UUID.fromString(tag.getString("mission_id"));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+            MissionType type = MissionType.parse(tag.getString("type")).orElse(null);
+            if (type == null) {
+                return null;
+            }
+            RewardOutboxPolicy.ReceiptState state =
+                    "CLAIMED".equals(tag.getString("state"))
+                            ? RewardOutboxPolicy.ReceiptState.CLAIMED
+                            : RewardOutboxPolicy.ReceiptState.PENDING;
+            return new RewardReceipt(id, type, state);
+        }
+
+        CompoundTag save() {
+            CompoundTag tag = new CompoundTag();
+            tag.putString("mission_id", missionId.toString());
+            tag.putString("type", type.serializedName());
+            tag.putString("state", state.name());
+            return tag;
+        }
+    }
+
+    /**
+     * Site cleanup deferred until the site chunk loads. The mission itself is
+     * already settled; only this idempotent world residue remains.
+     */
+    public record PendingSiteCleanup(
+            UUID missionId,
+            MissionType type,
+            BlockPos site,
+            int target) {
+        static PendingSiteCleanup load(CompoundTag tag) {
+            UUID id;
+            try {
+                id = UUID.fromString(tag.getString("mission_id"));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+            MissionType type = MissionType.parse(tag.getString("type")).orElse(null);
+            if (type == null || !tag.contains("site")) {
+                return null;
+            }
+            return new PendingSiteCleanup(
+                    id,
+                    type,
+                    BlockPos.of(tag.getLong("site")),
+                    Math.max(1, tag.getInt("target")));
+        }
+
+        CompoundTag save() {
+            CompoundTag tag = new CompoundTag();
+            tag.putString("mission_id", missionId.toString());
+            tag.putString("type", type.serializedName());
+            tag.putLong("site", site.asLong());
+            tag.putInt("target", target);
+            return tag;
+        }
+    }
+
+    /** Result of answering the current optional mission proposal. */
+    public enum ProposalAnswer {
+        ACCEPTED,
+        SKIPPED,
+        NOT_FOUND,
+        STALE_ID,
+        STALE_REVISION,
+        WRONG_STAGE,
+        SLOTS_FULL,
+        /** Internal: the proposal matches and the change may be applied. */
+        OK_FOR_APPLY
+    }
+
+    public enum OptionalSkipResult {
+        SKIPPED,
+        NOT_FOUND,
+        AMBIGUOUS,
+        STALE_REVISION,
+        WRONG_STAGE
     }
 }

@@ -5,12 +5,15 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.level.PistonEvent;
@@ -54,7 +57,8 @@ public final class MissionEvents {
             return;
         }
 
-        ActiveMission mission = CampaignSavedData.get(level.getServer()).activeMission();
+        CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        ActiveMission mission = data.activeMission();
         if (event.getEntity() instanceof ItemEntity droppedItem
                 && level == level.getServer().overworld()
                 && MissionWorldDirector.isRegeneratedMissionDrop(
@@ -68,19 +72,40 @@ public final class MissionEvents {
             return;
         }
 
-        if (!(event.getEntity() instanceof Zombie zombie)) {
+        if (event.getEntity() instanceof Zombie zombie) {
+            String activeTag = null;
+            if (mission != null && mission.type() == MissionType.ZOMBIE_BLOCKADE) {
+                activeTag = MissionWorldDirector.missionEntityTag(mission);
+            }
+            for (String tag : zombie.getTags()) {
+                if (MissionWorldDirector.isMissionEntityTag(tag) && !tag.equals(activeTag)) {
+                    zombie.discard();
+                    return;
+                }
+            }
             return;
         }
-        String activeTag = null;
-        if (mission != null && mission.type() == MissionType.ZOMBIE_BLOCKADE) {
-            activeTag = MissionWorldDirector.missionEntityTag(mission);
-        }
-        for (String tag : zombie.getTags()) {
-            if (MissionWorldDirector.isMissionEntityTag(tag) && !tag.equals(activeTag)) {
-                zombie.discard();
-                return;
+
+        if (event.getEntity() instanceof Villager survivor) {
+            for (String tag : survivor.getTags()) {
+                if (MissionWorldDirector.isSurvivorEntityTag(tag)
+                        && !belongsToActiveRescueMission(data, tag)) {
+                    survivor.discard();
+                    return;
+                }
             }
         }
+    }
+
+    private static boolean belongsToActiveRescueMission(CampaignSavedData data, String survivorTag) {
+        for (ActiveMission mission : data.optionalMissions()) {
+            if (mission.type() == MissionType.RESCUE_SURVIVOR
+                    && mission.stage() == MissionStage.ACTIVE
+                    && MissionWorldDirector.survivorEntityTag(mission).equals(survivorTag)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void onBlockBreak(BlockEvent.BreakEvent event) {
@@ -89,8 +114,12 @@ public final class MissionEvents {
             return;
         }
 
-        ActiveMission mission = CampaignSavedData.get(level.getServer()).activeMission();
-        if (MissionWorldDirector.isProtectedMissionBlock(mission, event.getPos())) {
+        CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        if (MissionWorldDirector.isProtectedMissionBlock(data.activeMission(), event.getPos())
+                || data.optionalMissions().stream()
+                        .anyMatch(mission -> MissionWorldDirector.isProtectedMissionBlock(
+                                mission,
+                                event.getPos()))) {
             event.setCanceled(true);
         }
     }
@@ -102,10 +131,11 @@ public final class MissionEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(level.getServer());
-        ActiveMission mission = data.activeMission();
         data.registerExplosion();
-        event.getAffectedBlocks().removeIf(
-                pos -> MissionWorldDirector.isProtectedMissionBlock(mission, pos));
+        event.getAffectedBlocks().removeIf(pos ->
+                MissionWorldDirector.isProtectedMissionBlock(data.activeMission(), pos)
+                        || data.optionalMissions().stream().anyMatch(mission ->
+                                MissionWorldDirector.isProtectedMissionBlock(mission, pos)));
     }
 
     public static void onPistonPre(PistonEvent.Pre event) {
@@ -114,13 +144,11 @@ public final class MissionEvents {
             return;
         }
 
-        ActiveMission mission = CampaignSavedData.get(level.getServer()).activeMission();
-        if (!MissionWorldDirector.hasProtectedMissionBlocks(mission)) {
+        CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        if (!anyProtectedMission(data)) {
             return;
         }
-        if (MissionWorldDirector.isProtectedMissionBlock(
-                mission,
-                event.getFaceOffsetPos())) {
+        if (anyProtectedBlockAt(data, event.getFaceOffsetPos())) {
             event.setCanceled(true);
             return;
         }
@@ -137,15 +165,95 @@ public final class MissionEvents {
         if (resolver == null || !resolver.resolve()) {
             return;
         }
-        if (MissionWorldDirector.containsProtectedMissionBlock(mission, resolver.getToPush())
-                || MissionWorldDirector.containsProtectedMissionBlock(
-                        mission,
-                        resolver.getToDestroy())
-                || MissionWorldDirector.movesIntoProtectedMissionBlock(
-                        mission,
-                        resolver.getToPush(),
-                        resolver.getPushDirection())) {
+        if (anyProtectedBlockIn(data, resolver.getToPush())
+                || anyProtectedBlockIn(data, resolver.getToDestroy())
+                || anyMovesIntoProtectedBlock(data, resolver)) {
             event.setCanceled(true);
         }
+    }
+
+    /**
+     * Salvage repair interaction: right-clicking a damaged car point records
+     * its unique index and swaps the block to the repaired variant. The index
+     * set deduplicates, so repeated clicks at one point never count twice.
+     */
+    public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+        if (!(event.getLevel() instanceof ServerLevel level)
+                || level != level.getServer().overworld()
+                || !(event.getEntity() instanceof ServerPlayer player)
+                || player.isSpectator()) {
+            return;
+        }
+
+        CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        for (ActiveMission mission : data.optionalMissions()) {
+            if (mission.type() != MissionType.SALVAGE_CAR
+                    || mission.stage() != MissionStage.ACTIVE
+                    || !mission.worldPrepared()
+                    || mission.site() == null) {
+                continue;
+            }
+            int index = OptionalMissionDirector.salvageDamageIndexAt(mission.site(), event.getPos());
+            if (index < 0 || index >= OptionalMissionDirector.SALVAGE_DAMAGE_POINTS) {
+                continue;
+            }
+            event.setCanceled(true);
+            if (!level.getBlockState(event.getPos()).is(Blocks.CRACKED_STONE_BRICKS)) {
+                return;
+            }
+            if (data.recordSalvageRepair(mission.id(), index)) {
+                level.setBlock(
+                        event.getPos(),
+                        Blocks.IRON_BLOCK.defaultBlockState(),
+                        3);
+                data.optionalMission(mission.id())
+                        .filter(m -> m.stage() == MissionStage.READY_TO_TURN_IN)
+                        .ifPresent(m -> level.getServer().getPlayerList().broadcastSystemMessage(
+                                Component.translatable("message.lasttrain.salvage_repaired"),
+                                false));
+            }
+            return;
+        }
+    }
+
+    private static boolean anyProtectedMission(CampaignSavedData data) {
+        if (MissionWorldDirector.hasProtectedMissionBlocks(data.activeMission())) {
+            return true;
+        }
+        return data.optionalMissions().stream()
+                .anyMatch(MissionWorldDirector::hasProtectedMissionBlocks);
+    }
+
+    private static boolean anyProtectedBlockAt(CampaignSavedData data, net.minecraft.core.BlockPos pos) {
+        if (MissionWorldDirector.isProtectedMissionBlock(data.activeMission(), pos)) {
+            return true;
+        }
+        return data.optionalMissions().stream()
+                .anyMatch(mission -> MissionWorldDirector.isProtectedMissionBlock(mission, pos));
+    }
+
+    private static boolean anyProtectedBlockIn(
+            CampaignSavedData data,
+            Iterable<net.minecraft.core.BlockPos> positions) {
+        for (net.minecraft.core.BlockPos pos : positions) {
+            if (anyProtectedBlockAt(data, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean anyMovesIntoProtectedBlock(
+            CampaignSavedData data,
+            PistonStructureResolver resolver) {
+        return MissionWorldDirector.movesIntoProtectedMissionBlock(
+                        data.activeMission(),
+                        resolver.getToPush(),
+                        resolver.getPushDirection())
+                || data.optionalMissions().stream().anyMatch(mission ->
+                        MissionWorldDirector.movesIntoProtectedMissionBlock(
+                                mission,
+                                resolver.getToPush(),
+                                resolver.getPushDirection()));
     }
 }

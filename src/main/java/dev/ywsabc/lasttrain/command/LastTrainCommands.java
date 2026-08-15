@@ -8,6 +8,8 @@ import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionBriefing;
+import dev.ywsabc.lasttrain.mission.MissionCommandPolicy;
 import dev.ywsabc.lasttrain.mission.MissionFallbackPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
@@ -15,10 +17,12 @@ import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.server.IntegrationBridge;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 public final class LastTrainCommands {
@@ -69,7 +73,47 @@ public final class LastTrainCommands {
                                 .executes(LastTrainCommands::failMission))
                         .then(Commands.literal("clear")
                                 .requires(source -> source.hasPermission(2))
-                                .executes(LastTrainCommands::clearMission)))
+                                .executes(LastTrainCommands::clearMission))
+                        .then(Commands.literal("accept")
+                                .executes(context -> answerProposal(context, null, null, true))
+                                .then(Commands.argument("id", StringArgumentType.word())
+                                        .executes(context -> answerProposal(
+                                                context,
+                                                StringArgumentType.getString(context, "id"),
+                                                null,
+                                                true))
+                                        .then(Commands.argument("revision", IntegerArgumentType.integer(0))
+                                                .executes(context -> answerProposal(
+                                                        context,
+                                                        StringArgumentType.getString(context, "id"),
+                                                        IntegerArgumentType.getInteger(context, "revision"),
+                                                        true)))))
+                        .then(Commands.literal("reject")
+                                .executes(context -> answerProposal(context, null, null, false))
+                                .then(Commands.argument("id", StringArgumentType.word())
+                                        .executes(context -> answerProposal(
+                                                context,
+                                                StringArgumentType.getString(context, "id"),
+                                                null,
+                                                false))
+                                        .then(Commands.argument("revision", IntegerArgumentType.integer(0))
+                                                .executes(context -> answerProposal(
+                                                        context,
+                                                        StringArgumentType.getString(context, "id"),
+                                                        IntegerArgumentType.getInteger(context, "revision"),
+                                                        false)))))
+                        .then(Commands.literal("skip")
+                                .executes(context -> skipOptional(context, null, null))
+                                .then(Commands.argument("id", StringArgumentType.word())
+                                        .executes(context -> skipOptional(
+                                                context,
+                                                StringArgumentType.getString(context, "id"),
+                                                null))
+                                        .then(Commands.argument("revision", IntegerArgumentType.integer(0))
+                                                .executes(context -> skipOptional(
+                                                        context,
+                                                        StringArgumentType.getString(context, "id"),
+                                                        IntegerArgumentType.getInteger(context, "revision")))))))
                 .then(Commands.literal("recover")
                         .then(Commands.literal("status")
                                 .executes(LastTrainCommands::recoverStatus))
@@ -138,15 +182,36 @@ public final class LastTrainCommands {
     }
 
     private static int missionStatus(CommandContext<CommandSourceStack> context) {
-        ActiveMission mission = data(context).activeMission();
-        if (mission == null) {
+        CampaignSavedData data = data(context);
+        ServerPlayer player = player(context);
+        if (player == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_player"));
+            return 0;
+        }
+        if (!MissionCommandPolicy.mayAnswer(actor(context, player, data))) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_team_member"));
+            return 0;
+        }
+        ActiveMission mission = data.activeMission();
+        if (mission == null && data.proposedMission() == null && data.optionalMissions().isEmpty()) {
             context.getSource().sendSuccess(
                     () -> Component.translatable("command.lasttrain.mission.none"),
                     false);
             return 0;
         }
-        context.getSource().sendSuccess(() -> missionSummary(mission), false);
-        return mission.progress();
+        if (mission != null) {
+            context.getSource().sendSuccess(() -> missionSummary(mission), false);
+        }
+        ActiveMission proposal = data.proposedMission();
+        if (proposal != null) {
+            context.getSource().sendSuccess(() -> proposalSummary(proposal), false);
+        }
+        for (ActiveMission optional : data.optionalMissions()) {
+            context.getSource().sendSuccess(() -> missionSummary(optional), false);
+        }
+        return 1;
     }
 
     private static int createMission(CommandContext<CommandSourceStack> context) {
@@ -162,6 +227,17 @@ public final class LastTrainCommands {
         }
 
         CampaignSavedData data = data(context);
+        if (type.category() == MissionType.Category.OPTIONAL) {
+            if (!data.proposeOptionalMission(type)) {
+                context.getSource().sendFailure(
+                        Component.translatable("command.lasttrain.mission.propose_refused"));
+                return 0;
+            }
+            context.getSource().sendSuccess(
+                    () -> proposalSummary(data.proposedMission()),
+                    true);
+            return 1;
+        }
         if (!data.createMission(type)) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.exists"));
             return 0;
@@ -258,6 +334,168 @@ public final class LastTrainCommands {
         return 1;
     }
 
+    // ------------------------------------------------------------------
+    // Optional mission answers
+    // ------------------------------------------------------------------
+
+    private static int answerProposal(
+            CommandContext<CommandSourceStack> context,
+            String rawId,
+            Integer revision,
+            boolean accept) {
+        CampaignSavedData data = data(context);
+        ServerPlayer player = player(context);
+        if (player == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_player"));
+            return 0;
+        }
+        if (!MissionCommandPolicy.mayAnswer(actor(context, player, data))) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_team_member"));
+            return 0;
+        }
+        UUID givenId = parseId(context, rawId);
+        if (rawId != null && givenId == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.invalid_id"));
+            return 0;
+        }
+
+        ActiveMission proposal = data.proposedMission();
+        Component missionName = proposal == null
+                ? Component.translatable("command.lasttrain.mission.none")
+                : Component.translatable("mission.lasttrain." + proposal.type().serializedName());
+        CampaignSavedData.ProposalAnswer result =
+                accept ? data.acceptProposal(givenId, revision) : data.rejectProposal(givenId, revision);
+        switch (result) {
+            case ACCEPTED -> {
+                context.getSource().sendSuccess(
+                        () -> Component.translatable(
+                                "command.lasttrain.mission.accepted",
+                                missionName),
+                        true);
+                return 1;
+            }
+            case SKIPPED -> {
+                context.getSource().sendSuccess(
+                        () -> Component.translatable(
+                                "command.lasttrain.mission.rejected",
+                                missionName),
+                        true);
+                return 1;
+            }
+            case NOT_FOUND -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.no_proposal"));
+            case STALE_ID -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.stale_id"));
+            case STALE_REVISION -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.stale_revision"));
+            case WRONG_STAGE -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.not_proposed"));
+            case SLOTS_FULL -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.optional_slots_full"));
+            case OK_FOR_APPLY -> {
+            }
+        }
+        return 0;
+    }
+
+    private static int skipOptional(
+            CommandContext<CommandSourceStack> context,
+            String rawId,
+            Integer revision) {
+        CampaignSavedData data = data(context);
+        ServerPlayer player = player(context);
+        if (player == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_player"));
+            return 0;
+        }
+        if (!MissionCommandPolicy.maySkip(actor(context, player, data))) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.requires_captain"));
+            return 0;
+        }
+        UUID givenId = parseId(context, rawId);
+        if (rawId != null && givenId == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.invalid_id"));
+            return 0;
+        }
+
+        Component targetName = skipTargetName(data, givenId);
+        CampaignSavedData.OptionalSkipResult result = data.skipOptionalMission(givenId, revision);
+        switch (result) {
+            case SKIPPED -> {
+                Component name = targetName != null
+                        ? targetName
+                        : Component.translatable("command.lasttrain.mission.none");
+                context.getSource().sendSuccess(
+                        () -> Component.translatable("command.lasttrain.mission.skipped", name),
+                        true);
+                return 1;
+            }
+            case NOT_FOUND -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.no_optional"));
+            case AMBIGUOUS -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.ambiguous_optional"));
+            case STALE_REVISION -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.stale_revision"));
+            case WRONG_STAGE -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.optional_not_skippable"));
+        }
+        return 0;
+    }
+
+    /** The task shown for confirmation when skipping without an id. */
+    private static Component skipTargetName(CampaignSavedData data, UUID givenId) {
+        if (givenId != null) {
+            return data.optionalMission(givenId)
+                    .map(mission -> Component.translatable(
+                            "mission.lasttrain." + mission.type().serializedName()))
+                    .orElse(null);
+        }
+        java.util.List<ActiveMission> skippable = data.optionalMissions().stream()
+                .filter(mission -> mission.stage() == MissionStage.ACTIVE
+                        || mission.stage() == MissionStage.READY_TO_TURN_IN)
+                .toList();
+        if (skippable.size() != 1) {
+            return null;
+        }
+        return Component.translatable(
+                "mission.lasttrain." + skippable.get(0).type().serializedName());
+    }
+
+    private static ServerPlayer player(CommandContext<CommandSourceStack> context) {
+        return context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
+    }
+
+    private static MissionCommandPolicy.Actor actor(
+            CommandContext<CommandSourceStack> context,
+            ServerPlayer player,
+            CampaignSavedData data) {
+        return new MissionCommandPolicy.Actor(
+                true,
+                player.isSpectator(),
+                data.isTeamMember(player.getUUID()),
+                context.getSource().hasPermission(MissionCommandPolicy.SKIP_PERMISSION_LEVEL)
+                        ? MissionCommandPolicy.SKIP_PERMISSION_LEVEL
+                        : 0,
+                data.isCaptain(player.getUUID()));
+    }
+
+    private static UUID parseId(CommandContext<CommandSourceStack> context, String rawId) {
+        if (rawId == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(rawId);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
     private static int recoverStatus(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
         context.getSource().sendSuccess(
@@ -302,7 +540,33 @@ public final class LastTrainCommands {
                 mission.progress(),
                 mission.target(),
                 mission.routeSegment(),
-                mission.stage().name());
+                Component.translatable("mission.lasttrain.stage."
+                        + mission.stage().name().toLowerCase(Locale.ROOT)));
+    }
+
+    /** Pre-acceptance briefing: type, risk, reward category and time limit. */
+    private static Component proposalSummary(ActiveMission proposal) {
+        MissionBriefing briefing = MissionBriefing.of(proposal.type()).orElse(null);
+        Component risk = briefing == null
+                ? Component.translatable("briefing.lasttrain.risk.none")
+                : Component.translatable(
+                        "briefing.lasttrain.risk." + briefing.risk().name().toLowerCase(Locale.ROOT));
+        Component reward = briefing == null
+                ? Component.translatable("briefing.lasttrain.reward.none")
+                : Component.translatable(
+                        "briefing.lasttrain.reward." + briefing.reward().name().toLowerCase(Locale.ROOT));
+        Component timed = briefing == null
+                ? Component.translatable("briefing.lasttrain.timed.none")
+                : Component.translatable("briefing.lasttrain.timed.days", briefing.timedDays());
+        return Component.translatable(
+                "command.lasttrain.mission.proposal",
+                Component.translatable("mission.lasttrain." + proposal.type().serializedName()),
+                proposal.id(),
+                proposal.revision(),
+                proposal.routeSegment(),
+                risk,
+                reward,
+                timed);
     }
 
     private static Component missionSiteUnavailable(ActiveMission mission) {

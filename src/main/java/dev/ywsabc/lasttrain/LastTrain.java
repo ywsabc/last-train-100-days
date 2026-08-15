@@ -44,6 +44,7 @@ public final class LastTrain {
         NeoForge.EVENT_BUS.addListener(MissionEvents::onBlockBreak);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onExplosionDetonate);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onPistonPre);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onRightClickBlock);
         TaczGunfireBridge.install(NeoForge.EVENT_BUS);
         LOGGER.info("Last Train campaign core is loading");
     }

@@ -11,11 +11,18 @@ import java.util.UUID;
  * two completion gates explicit and straightforward to regression test.</p>
  */
 public final class FinalePolicy {
+    /**
+     * Schema 7 added the optional mission system (proposals, optional mission
+     * list, reward receipts, pending site cleanups, mission history and team
+     * membership). All new fields load with safe empty defaults, so older
+     * saves need no data migration; only the schema number advances.
+     */
     public static final int CURRENT_SCHEMA = 7;
     public static final int FINAL_DAY = 100;
     public static final int FINALE_HUB_START_DAY = 90;
     public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;
     private static final String FINALE_ID_NAMESPACE = "lasttrain:finale:";
+    private static final int FINALE_REOPEN_SCHEMA = 6;
 
     private FinalePolicy() {
     }
@@ -107,10 +114,12 @@ public final class FinalePolicy {
         boolean migratedElapsed = finalDayElapsed;
         boolean migratedMissionCompleted = finaleMissionCompleted;
 
-        if (loadedSchema < 6) {
+        if (loadedSchema < FINALE_REOPEN_SCHEMA) {
             // Schema 5 only reached COMPLETED after its final-day timer path.
             // Preserve that elapsed-time achievement but require the new
             // finale mission before considering the campaign complete again.
+            // Schema 6+ saves already carry the finale mission state and must
+            // not be reopened by later schema bumps.
             if (status == CampaignStatus.COMPLETED && day >= FINAL_DAY) {
                 migratedElapsed = true;
                 migratedStatus = CampaignStatus.RUNNING;

@@ -26,12 +26,20 @@ class MissionWorldDirectorScalingLayoutTest {
         assertArrayEquals(
                 new int[0],
                 MissionWorldDirector.objectiveXOffsets(MissionType.ZOMBIE_BLOCKADE, 12));
+        assertArrayEquals(
+                new int[0],
+                MissionWorldDirector.objectiveXOffsets(MissionType.RESCUE_SURVIVOR, 1));
+        assertArrayEquals(
+                new int[0],
+                MissionWorldDirector.objectiveXOffsets(MissionType.SALVAGE_CAR, 6));
     }
 
     @Test
     void scaledTargetsCreateUniqueDeterministicOffsets() {
         for (MissionType type : MissionType.values()) {
-            if (type == MissionType.ZOMBIE_BLOCKADE) {
+            if (type == MissionType.ZOMBIE_BLOCKADE
+                    || type == MissionType.RESCUE_SURVIVOR
+                    || type == MissionType.SALVAGE_CAR) {
                 continue;
             }
             for (int target = 1; target <= 20; target++) {

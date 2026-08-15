@@ -35,6 +35,7 @@ public final class MissionWorldDirector {
     private static final int UPDATE_ALL = 3;
     private static final int TICK_INTERVAL = 10;
     private static final String MISSION_ENTITY_TAG_PREFIX = "lasttrain_mission_";
+    private static final String SURVIVOR_TAG_SUFFIX = "_survivor";
     private static final String SUPPLY_MISSION_ID_KEY = "lasttrain_supply_mission_id";
     private static final String SUPPLY_INDEX_KEY = "lasttrain_supply_index";
 
@@ -65,7 +66,7 @@ public final class MissionWorldDirector {
                 }
                 yield offsets;
             }
-            case ZOMBIE_BLOCKADE -> new int[0];
+            case ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> new int[0];
         };
     }
 
@@ -90,6 +91,10 @@ public final class MissionWorldDirector {
         if (serverTick % TICK_INTERVAL != 0) {
             return;
         }
+        // Optional missions run beside the mainline: timeouts, outbox
+        // dispatch and site work proceed even while no mainline blocker or
+        // no prepared mainline site exists.
+        OptionalMissionDirector.tick(server, data);
 
         ActiveMission mission = data.activeMission();
         if (mission == null) {
@@ -190,6 +195,7 @@ public final class MissionWorldDirector {
                 case STATION_GATE -> prepareStationGate(level, mission);
                 case SUPPLY_RECOVERY -> prepareSupplyRecovery(level, mission);
                 case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, mission);
+                case RESCUE_SURVIVOR, SALVAGE_CAR -> true;
             };
         } catch (RuntimeException exception) {
             LastTrain.LOGGER.error(
@@ -207,7 +213,7 @@ public final class MissionWorldDirector {
             case STATION_POWER -> observePoweredLevers(level, mission);
             case STATION_GATE -> observeOpenDoors(level, mission);
             case SUPPLY_RECOVERY -> observeRecoveredBarrels(level, mission);
-            case ZOMBIE_BLOCKADE -> mission.progress();
+            case ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> mission.progress();
         };
     }
 
@@ -351,7 +357,7 @@ public final class MissionWorldDirector {
         }
         try {
             return switch (mission.type()) {
-                case RAIL_BREAK, ZOMBIE_BLOCKADE -> true;
+                case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> true;
                 case STATION_POWER -> {
                     repairStationPower(level, mission);
                     ensureRouteBarrier(level, mission.site());
@@ -608,6 +614,9 @@ public final class MissionWorldDirector {
             case SUPPLY_RECOVERY -> {
                 // Recovered supply barrels remain as ordinary station loot.
             }
+            case RESCUE_SURVIVOR, SALVAGE_CAR -> {
+                // Optional sites are cleaned up by OptionalMissionDirector.
+            }
         }
         return true;
     }
@@ -690,8 +699,20 @@ public final class MissionWorldDirector {
         return MISSION_ENTITY_TAG_PREFIX + mission.id();
     }
 
+    static String survivorEntityTag(ActiveMission mission) {
+        return survivorEntityTag(mission.id());
+    }
+
+    static String survivorEntityTag(java.util.UUID missionId) {
+        return MISSION_ENTITY_TAG_PREFIX + missionId + SURVIVOR_TAG_SUFFIX;
+    }
+
     static boolean isMissionEntityTag(String tag) {
         return tag.startsWith(MISSION_ENTITY_TAG_PREFIX);
+    }
+
+    static boolean isSurvivorEntityTag(String tag) {
+        return tag.startsWith(MISSION_ENTITY_TAG_PREFIX) && tag.endsWith(SURVIVOR_TAG_SUFFIX);
     }
 
     /**
@@ -722,7 +743,8 @@ public final class MissionWorldDirector {
             case SUPPLY_RECOVERY -> dy == 0
                     && dz == 4
                     && containsObjectiveXOffset(offsets, dx);
-            case RAIL_BREAK, ZOMBIE_BLOCKADE -> false;
+            case SALVAGE_CAR -> OptionalMissionDirector.isProtectedSalvageBlock(mission, pos);
+            case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR -> false;
         };
     }
 
@@ -732,7 +754,8 @@ public final class MissionWorldDirector {
                 && mission.worldPrepared()
                 && mission.stage() == MissionStage.ACTIVE
                 && mission.type() != MissionType.RAIL_BREAK
-                && mission.type() != MissionType.ZOMBIE_BLOCKADE;
+                && mission.type() != MissionType.ZOMBIE_BLOCKADE
+                && mission.type() != MissionType.RESCUE_SURVIVOR;
     }
 
     static boolean containsProtectedMissionBlock(
@@ -810,7 +833,8 @@ public final class MissionWorldDirector {
                     && containsObjectiveXOffset(offsets, dx)
                     ? RegeneratedMissionDrop.BARREL
                     : RegeneratedMissionDrop.NONE;
-            case RAIL_BREAK, ZOMBIE_BLOCKADE -> RegeneratedMissionDrop.NONE;
+            case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR ->
+                    RegeneratedMissionDrop.NONE;
         };
     }
 

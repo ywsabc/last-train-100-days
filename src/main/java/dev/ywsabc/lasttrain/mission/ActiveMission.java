@@ -1,20 +1,68 @@
 package dev.ywsabc.lasttrain.mission;
 
+import java.util.LinkedHashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 
+/**
+ * One persisted mission instance.
+ *
+ * <p>Mainline missions live in the single route-blocking slot. Optional
+ * missions are created as {@link MissionStage#PROPOSED} with an absolute tick
+ * deadline captured from the campaign's monotonic active-tick counter, then
+ * moved to the optional list on acceptance. Salvage-car repair progress is an
+ * index set: repairing the same damage point twice counts once, and the set
+ * survives restarts independently of the world blocks.</p>
+ */
 public final class ActiveMission {
+    static final int MAX_REPAIR_INDICES = 64;
+    static final int MAX_TARGET = 4_096;
+
     private final UUID id;
     private final MissionType type;
     private final int createdDay;
     private final int routeSegment;
     private final int target;
+    private final long createdTick;
+    private final long deadlineTick;
+    private final Set<Integer> repairedIndices = new LinkedHashSet<>();
     private MissionStage stage;
+    private int revision;
     private int progress;
     private BlockPos site;
     private boolean worldPrepared;
+
+    private ActiveMission(
+            UUID id,
+            MissionType type,
+            MissionStage stage,
+            int revision,
+            int createdDay,
+            int routeSegment,
+            int progress,
+            int target,
+            BlockPos site,
+            boolean worldPrepared,
+            long createdTick,
+            long deadlineTick) {
+        this.id = Objects.requireNonNull(id, "id");
+        this.type = Objects.requireNonNull(type, "type");
+        this.stage = stage;
+        this.revision = Math.max(0, revision);
+        this.createdDay = createdDay;
+        this.routeSegment = routeSegment;
+        this.progress = Math.max(0, progress);
+        this.target = Math.clamp(Math.max(1, target), 1, MAX_TARGET);
+        this.site = site;
+        this.worldPrepared = worldPrepared;
+        this.createdTick = Math.max(0L, createdTick);
+        this.deadlineTick = Math.max(this.createdTick, deadlineTick);
+        normalizeStage();
+    }
 
     public ActiveMission(
             UUID id,
@@ -26,16 +74,19 @@ public final class ActiveMission {
             int target,
             BlockPos site,
             boolean worldPrepared) {
-        this.id = id;
-        this.type = type;
-        this.stage = stage;
-        this.createdDay = createdDay;
-        this.routeSegment = routeSegment;
-        this.progress = Math.max(0, progress);
-        this.target = Math.max(1, target);
-        this.site = site;
-        this.worldPrepared = worldPrepared;
-        normalizeStage();
+        this(
+                id,
+                type,
+                stage,
+                0,
+                createdDay,
+                routeSegment,
+                progress,
+                target,
+                site,
+                worldPrepared,
+                0L,
+                Long.MAX_VALUE);
     }
 
     public static ActiveMission create(MissionType type, int day, int routeSegment) {
@@ -86,6 +137,51 @@ public final class ActiveMission {
                 false);
     }
 
+    /**
+     * Creates an optional mission proposal. The deadline is an absolute
+     * monotonic tick captured at creation time, never a capped day
+     * difference, so proposals made on day 99 still settle on day 100.
+     */
+    public static ActiveMission createProposal(
+            MissionType type,
+            int day,
+            int routeSegment,
+            long createdTick) {
+        return createProposal(
+                UUID.randomUUID(),
+                type,
+                day,
+                routeSegment,
+                type.defaultTarget(),
+                createdTick);
+    }
+
+    public static ActiveMission createProposal(
+            UUID id,
+            MissionType type,
+            int day,
+            int routeSegment,
+            int target,
+            long createdTick) {
+        if (!OptionalMissionPolicy.isOptional(type)) {
+            throw new IllegalArgumentException(
+                    type + " cannot be proposed as an optional mission");
+        }
+        return new ActiveMission(
+                id,
+                type,
+                MissionStage.PROPOSED,
+                0,
+                day,
+                routeSegment,
+                0,
+                target,
+                null,
+                false,
+                createdTick,
+                OptionalMissionPolicy.deadlineTick(createdTick, type));
+    }
+
     public static ActiveMission load(CompoundTag tag, HolderLookup.Provider registries) {
         UUID id;
         try {
@@ -95,16 +191,27 @@ public final class ActiveMission {
         }
 
         MissionType type = MissionType.parse(tag.getString("type")).orElse(MissionType.RAIL_BREAK);
-        return new ActiveMission(
+        int target = tag.contains("target") ? tag.getInt("target") : type.defaultTarget();
+        ActiveMission mission = new ActiveMission(
                 id,
                 type,
                 MissionStage.fromSerializedName(tag.getString("stage")),
+                tag.getInt("revision"),
                 tag.getInt("created_day"),
                 tag.getInt("route_segment"),
                 tag.getInt("progress"),
-                tag.contains("target") ? tag.getInt("target") : type.defaultTarget(),
+                target,
                 tag.contains("site") ? BlockPos.of(tag.getLong("site")) : null,
-                tag.getBoolean("world_prepared"));
+                tag.getBoolean("world_prepared"),
+                tag.getLong("created_tick"),
+                tag.contains("deadline_tick")
+                        ? tag.getLong("deadline_tick")
+                        : Long.MAX_VALUE);
+        for (int index : tag.getIntArray("repair_indices")) {
+            mission.recordRepairIndex(index);
+        }
+        mission.normalizeStage();
+        return mission;
     }
 
     public CompoundTag save(HolderLookup.Provider registries) {
@@ -112,6 +219,7 @@ public final class ActiveMission {
         tag.putString("id", id.toString());
         tag.putString("type", type.serializedName());
         tag.putString("stage", stage.name());
+        tag.putInt("revision", revision);
         tag.putInt("created_day", createdDay);
         tag.putInt("route_segment", routeSegment);
         tag.putInt("progress", progress);
@@ -120,11 +228,60 @@ public final class ActiveMission {
             tag.putLong("site", site.asLong());
         }
         tag.putBoolean("world_prepared", worldPrepared);
+        tag.putLong("created_tick", createdTick);
+        tag.putLong("deadline_tick", deadlineTick);
+        tag.putIntArray(
+                "repair_indices",
+                repairedIndices.stream().sorted().mapToInt(Integer::intValue).toArray());
         return tag;
     }
 
+    /**
+     * State migration with optimistic-concurrency protection: every transition
+     * bumps the revision so stale accept/reject/skip answers are rejected
+     * before their effect is applied.
+     */
+    public boolean transitionTo(MissionStage nextStage) {
+        Objects.requireNonNull(nextStage, "nextStage");
+        if (stage == nextStage) {
+            return false;
+        }
+        stage = nextStage;
+        revision++;
+        return true;
+    }
+
+    /**
+     * Records one repaired salvage damage point. The index set is the
+     * authority: the same position repaired twice counts once, and out-of
+     * range or already recorded indices change nothing.
+     */
+    public boolean recordRepairIndex(int index) {
+        if (stage.terminal() || index < 0 || index >= target) {
+            return false;
+        }
+        if (repairedIndices.size() >= MAX_REPAIR_INDICES) {
+            return false;
+        }
+        if (!repairedIndices.add(index)) {
+            return false;
+        }
+        normalizeStage();
+        return true;
+    }
+
+    public boolean hasRepairIndex(int index) {
+        return repairedIndices.contains(index);
+    }
+
+    public Set<Integer> repairedIndices() {
+        return Set.copyOf(repairedIndices);
+    }
+
     public boolean addProgress(int amount) {
-        if (stage == MissionStage.COMPLETED || stage == MissionStage.FAILED || amount <= 0) {
+        if (stage.terminal()
+                || type == MissionType.SALVAGE_CAR
+                || amount <= 0) {
             return false;
         }
 
@@ -135,7 +292,7 @@ public final class ActiveMission {
     }
 
     public boolean setObservedProgress(int observedProgress) {
-        if (stage == MissionStage.COMPLETED || stage == MissionStage.FAILED) {
+        if (stage.terminal() || type == MissionType.SALVAGE_CAR) {
             return false;
         }
 
@@ -167,13 +324,16 @@ public final class ActiveMission {
     public void complete() {
         progress = target;
         stage = MissionStage.COMPLETED;
+        revision++;
     }
 
     private void normalizeStage() {
-        if (stage == MissionStage.COMPLETED || stage == MissionStage.FAILED) {
+        if (stage.terminal()
+                || stage == MissionStage.PROPOSED
+                || stage == MissionStage.REWARD_PENDING) {
             return;
         }
-        stage = progress >= target
+        stage = progress() >= target
                 ? MissionStage.READY_TO_TURN_IN
                 : MissionStage.ACTIVE;
     }
@@ -190,6 +350,10 @@ public final class ActiveMission {
         return stage;
     }
 
+    public int revision() {
+        return revision;
+    }
+
     public int createdDay() {
         return createdDay;
     }
@@ -199,7 +363,7 @@ public final class ActiveMission {
     }
 
     public int progress() {
-        return progress;
+        return type == MissionType.SALVAGE_CAR ? repairedIndices.size() : progress;
     }
 
     public int target() {
@@ -212,5 +376,17 @@ public final class ActiveMission {
 
     public boolean worldPrepared() {
         return worldPrepared;
+    }
+
+    public long createdTick() {
+        return createdTick;
+    }
+
+    public long deadlineTick() {
+        return deadlineTick;
+    }
+
+    public boolean isOptional() {
+        return type.category() == MissionType.Category.OPTIONAL;
     }
 }
