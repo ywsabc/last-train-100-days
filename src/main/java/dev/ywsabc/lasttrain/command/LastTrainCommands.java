@@ -7,6 +7,7 @@ import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionFallbackPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
@@ -61,6 +62,9 @@ public final class LastTrainCommands {
                                         .executes(LastTrainCommands::progressMission)))
                         .then(Commands.literal("turn_in")
                                 .executes(LastTrainCommands::turnInMission))
+                        .then(Commands.literal("fail")
+                                .requires(source -> source.hasPermission(2))
+                                .executes(LastTrainCommands::failMission))
                         .then(Commands.literal("clear")
                                 .requires(source -> source.hasPermission(2))
                                 .executes(LastTrainCommands::clearMission))));
@@ -187,6 +191,34 @@ public final class LastTrainCommands {
                     Component.translatable("message.lasttrain.campaign_completed"),
                     false);
         }
+        IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
+        return 1;
+    }
+
+    private static int failMission(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        ActiveMission mission = data.activeMission();
+        if (mission == null) {
+            context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.none"));
+            return 0;
+        }
+        if (data.isFinaleMission(mission)) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mission.finale_cannot_fail"));
+            return 0;
+        }
+        if (!MissionWorldDirector.clearMissionWorld(
+                context.getSource().getServer().overworld(),
+                mission)) {
+            context.getSource().sendFailure(missionSiteUnavailable(mission));
+            return 0;
+        }
+        data.failMission(MissionFallbackPolicy.THREAT_PENALTY);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.mission.failed",
+                        data.threat()),
+                true);
         IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
         return 1;
     }

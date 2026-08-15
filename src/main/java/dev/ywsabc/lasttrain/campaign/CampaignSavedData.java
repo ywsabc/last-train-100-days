@@ -420,6 +420,21 @@ public final class CampaignSavedData extends SavedData {
         return true;
     }
 
+    /**
+     * Fails the active ordinary mission and applies the fallback penalty.
+     * Finale missions are the campaign completion gate and are never failed
+     * by this path; admins can still explicitly clear one for debugging.
+     */
+    public boolean failMission(int threatPenalty) {
+        if (activeMission == null || isFinaleMission(activeMission)) {
+            return false;
+        }
+        activeMission = null;
+        threat = Math.min(100, threat + Math.max(0, threatPenalty));
+        setDirty();
+        return true;
+    }
+
     public boolean claimStarterKit(UUID playerId) {
         if (!starterKitRecipients.add(playerId)) {
             return false;

@@ -95,6 +95,24 @@ public final class MissionWorldDirector {
         if (mission == null) {
             return;
         }
+        if (MissionFallbackPolicy.shouldFallback(
+                mission,
+                data.day(),
+                data.isFinaleMission(mission))) {
+            if (canClearFallbackWorld(server.overworld(), mission)
+                    && data.failMission(MissionFallbackPolicy.THREAT_PENALTY)) {
+                server.getPlayerList().broadcastSystemMessage(
+                        Component.translatable(
+                                "message.lasttrain.mission_failed",
+                                Component.translatable(
+                                        "mission.lasttrain." + mission.type().serializedName()),
+                                data.threat()),
+                        false);
+            }
+            // The cleanup may still need its chunks loaded. Do not prepare,
+            // repair, or observe an expired roadblock while that is pending.
+            return;
+        }
         // Reconciliation is deliberately periodic: it repairs entity/save
         // skew quickly without scanning every loaded entity twenty times per
         // second for the whole duration of a blockade.
@@ -545,6 +563,13 @@ public final class MissionWorldDirector {
             }
         }
         return recovered;
+    }
+
+    private static boolean canClearFallbackWorld(ServerLevel level, ActiveMission mission) {
+        if (!mission.worldPrepared() || mission.site() == null) {
+            return true;
+        }
+        return clearMissionWorld(level, mission);
     }
 
     public static boolean clearMissionWorld(ServerLevel level, ActiveMission mission) {
