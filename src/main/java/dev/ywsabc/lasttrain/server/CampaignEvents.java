@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.UUID;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -47,6 +48,13 @@ public final class CampaignEvents {
         int activePlayers = (int) server.getPlayerList().getPlayers().stream()
                 .filter(player -> !player.isSpectator())
                 .count();
+        long logicalTick = server.overworld().getGameTime();
+        ServerPlayer captain = data.captainId() == null
+                ? null
+                : server.getPlayerList().getPlayer(data.captainId());
+        boolean captainOnline = captain != null && !captain.isSpectator();
+        data.observeCaptainOnline(captainOnline, logicalTick);
+        data.expirePendingVote(logicalTick);
         observeTrainRecovery(server, data, activePlayers);
         if (activePlayers == 0) {
             return;
@@ -56,13 +64,19 @@ public final class CampaignEvents {
             UUID trainId = data.starterTrainSublevelId();
             boolean trainLocated = trainId != null
                     && SableTrainTracker.position(server.overworld(), trainId).isPresent();
-            if (CampaignStartPolicy.shouldAutoStart(
+            UUID firstStarter = server.getPlayerList().getPlayers().stream()
+                    .filter(player -> !player.isSpectator())
+                    .map(player -> player.getUUID())
+                    .findFirst()
+                    .orElse(null);
+            if (firstStarter != null
+                    && CampaignStartPolicy.shouldAutoStart(
                             activePlayers > 0,
                             data.starterStationBuilt(),
                             data.starterTrainAssembled(),
                             trainId != null,
                             trainLocated)
-                    && data.start()) {
+                    && data.start(firstStarter)) {
                 IntegrationBridge.syncCampaignNumbers(server, data);
                 broadcast(server, Component.translatable("message.lasttrain.campaign_started"));
             }

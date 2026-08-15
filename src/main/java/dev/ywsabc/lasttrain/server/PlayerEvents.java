@@ -48,6 +48,9 @@ public final class PlayerEvents {
 
         CampaignSavedData data = CampaignSavedData.get(player.getServer());
         data.registerTeamMember(player.getUUID());
+        data.observeCaptainOnline(
+                isCaptainOnline(player.getServer(), data),
+                player.getServer().overworld().getGameTime());
         issueStarterSupplies(player, data);
         sendCampaignSummary(player, data);
         enqueueReturn(player);
@@ -64,8 +67,24 @@ public final class PlayerEvents {
 
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
+            CampaignSavedData data = CampaignSavedData.get(player.getServer());
+            if (data.isCaptain(player.getUUID())) {
+                data.observeCaptainOnline(
+                        false,
+                        player.getServer().overworld().getGameTime());
+            }
             removePending(player);
         }
+    }
+
+    private static boolean isCaptainOnline(
+            MinecraftServer server,
+            CampaignSavedData data) {
+        UUID captain = data.captainId();
+        ServerPlayer player = captain == null
+                ? null
+                : server.getPlayerList().getPlayer(captain);
+        return player != null && !player.isSpectator();
     }
 
     public static void onServerTick(ServerTickEvent.Post event) {

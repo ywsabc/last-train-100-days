@@ -89,6 +89,10 @@ public final class CampaignSavedData extends SavedData {
     private final List<MissionPoolPolicy.Entry> missionHistory = new ArrayList<>();
     private final Set<UUID> teamMembers = new LinkedHashSet<>();
     private UUID captainId;
+    private long captainTransferTick;
+    private long captainOfflineSinceTick = -1L;
+    private boolean captainOnline = true;
+    private TeamPermissionPolicy.Vote pendingTeamVote;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
 
@@ -246,7 +250,9 @@ public final class CampaignSavedData extends SavedData {
     /**
      * Loads the optional-mission state added in schema 7. All collections are
      * capped during deserialization; missing keys keep safe empty defaults so
-     * every older save loads unchanged. Reward receipts over the cap drop
+     * every older save loads unchanged. P5 vote state is deliberately not
+     * restored here: a pending vote is persisted for the current SavedData
+     * snapshot but is cancelled on restart. Reward receipts over the cap drop
      * oldest {@link RewardOutboxPolicy.ReceiptState#CLAIMED} entries first and
      * never evict an undelivered PENDING receipt.
      */
@@ -317,6 +323,23 @@ public final class CampaignSavedData extends SavedData {
                 data.captainId = null;
             }
         }
+        data.captainTransferTick = Math.max(0L, tag.getLong("captain_transfer_tick"));
+        data.captainOfflineSinceTick = tag.contains("captain_offline_since_tick")
+                ? Math.max(-1L, tag.getLong("captain_offline_since_tick"))
+                : -1L;
+        data.captainOnline = data.captainOfflineSinceTick < 0L;
+        if (data.captainId != null && !data.teamMembers.contains(data.captainId)) {
+            // A malformed or pre-P5 save must not grant captain powers to an
+            // UUID that is not actually in this campaign's team.
+            data.captainId = null;
+        }
+        if (data.captainId == null && !data.teamMembers.isEmpty()) {
+            data.captainId = data.teamMembers.iterator().next();
+        }
+        if (data.captainId == null) {
+            data.captainOfflineSinceTick = -1L;
+            data.captainOnline = true;
+        }
     }
 
     private static void loadRewardReceipts(CompoundTag tag, CampaignSavedData data) {
@@ -382,6 +405,22 @@ public final class CampaignSavedData extends SavedData {
         if (captainId != null) {
             tag.putString("captain_id", captainId.toString());
         }
+        tag.putLong("captain_transfer_tick", captainTransferTick);
+        tag.putLong("captain_offline_since_tick", captainOfflineSinceTick);
+        if (pendingTeamVote != null) {
+            tag.put("pending_team_vote", saveVote(pendingTeamVote));
+        }
+    }
+
+    private static CompoundTag saveVote(TeamPermissionPolicy.Vote vote) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("operation", vote.operation().serializedName());
+        tag.putString("initiated_by", vote.initiatedBy().toString());
+        tag.putLong("started_at_tick", vote.startedAtTick());
+        tag.putLong("expires_at_tick", vote.expiresAtTick());
+        tag.put("yes_votes", saveUuidSet(vote.yesVotes()));
+        tag.put("no_votes", saveUuidSet(vote.noVotes()));
+        return tag;
     }
 
     private static void loadUuidSet(CompoundTag tag, String key, Set<UUID> target) {
@@ -548,13 +587,37 @@ public final class CampaignSavedData extends SavedData {
         return TickOutcome.SIEGE_TRIGGERED;
     }
 
-    public boolean start() {
+    /**
+     * Starts the campaign and assigns the first starter to captain. The UUID
+     * is supplied by the logical server rather than trusted from a client
+     * payload; the no-argument overload remains for old callers/tests that
+     * start a campaign before any player has joined.
+     */
+    public boolean start(UUID captain) {
         if (status != CampaignStatus.NOT_STARTED) {
             return false;
+        }
+        if (captain != null) {
+            if (!teamMembers.contains(captain)) {
+                if (teamMembers.size() >= MAX_TEAM_MEMBERS) {
+                    return false;
+                }
+                teamMembers.add(captain);
+            }
+            // The UUID passed by the server is the player who actually
+            // started this campaign. It is authoritative even when a player
+            // had joined the world before the start command was issued.
+            captainId = captain;
+            captainOnline = true;
+            captainOfflineSinceTick = -1L;
         }
         status = CampaignStatus.RUNNING;
         setDirty();
         return true;
+    }
+
+    public boolean start() {
+        return start(null);
     }
 
     public TickOutcome tick() {
@@ -1166,6 +1229,10 @@ public final class CampaignSavedData extends SavedData {
 
     /** Team membership for command permission checks; first member is captain. */
     public boolean registerTeamMember(UUID playerId) {
+        if (playerId == null
+                || (teamMembers.size() >= MAX_TEAM_MEMBERS && !teamMembers.contains(playerId))) {
+            return false;
+        }
         if (!teamMembers.add(playerId)) {
             return false;
         }
@@ -1182,6 +1249,243 @@ public final class CampaignSavedData extends SavedData {
 
     public boolean isCaptain(UUID playerId) {
         return playerId != null && playerId.equals(captainId);
+    }
+
+    /** Current captain UUID, or {@code null} when a legacy/empty team has no captain. */
+    public UUID captainId() {
+        return captainId;
+    }
+
+    public Set<UUID> teamMembers() {
+        return Set.copyOf(teamMembers);
+    }
+
+    public long captainTransferTick() {
+        return captainTransferTick;
+    }
+
+    public long captainOfflineSinceTick() {
+        return captainOfflineSinceTick;
+    }
+
+    public boolean captainOnline() {
+        return captainOnline;
+    }
+
+    /**
+     * Records the server's latest captain presence observation. The time
+     * source is supplied by the server event layer, so unit tests can use an
+     * arbitrary monotonic tick sequence.
+     */
+    public boolean observeCaptainOnline(boolean online, long currentTick) {
+        if (captainId == null) {
+            return false;
+        }
+        long safeTick = Math.max(0L, currentTick);
+        if (online) {
+            if (!captainOnline || captainOfflineSinceTick >= 0L) {
+                captainOnline = true;
+                captainOfflineSinceTick = -1L;
+                setDirty();
+                return true;
+            }
+            return false;
+        }
+
+        long offlineSince = captainOfflineSinceTick;
+        if (offlineSince < 0L || safeTick < offlineSince) {
+            offlineSince = safeTick;
+        }
+        if (captainOnline || captainOfflineSinceTick != offlineSince) {
+            captainOnline = false;
+            captainOfflineSinceTick = offlineSince;
+            setDirty();
+            return true;
+        }
+        return false;
+    }
+
+    /** Transfers captaincy without changing team membership. */
+    public boolean transferCaptain(UUID requester, UUID target, long currentTick) {
+        return transferCaptain(requester, target, currentTick, true);
+    }
+
+    /** Transfer variant used when the command target is an offline UUID. */
+    public boolean transferCaptain(
+            UUID requester,
+            UUID target,
+            long currentTick,
+            boolean targetOnline) {
+        if (!isCaptain(requester)
+                || target == null
+                || requester.equals(target)
+                || !isTeamMember(target)) {
+            return false;
+        }
+        captainId = target;
+        captainTransferTick = Math.max(0L, currentTick);
+        captainOnline = targetOnline;
+        captainOfflineSinceTick = targetOnline ? -1L : Math.max(0L, currentTick);
+        setDirty();
+        return true;
+    }
+
+    /** Claims captaincy after the configured offline interval has elapsed. */
+    public boolean claimCaptain(UUID requester, long currentTick) {
+        return claimCaptain(requester, currentTick, TeamPermissionPolicy.Config.defaults());
+    }
+
+    public boolean claimCaptain(
+            UUID requester,
+            long currentTick,
+            TeamPermissionPolicy.Config config) {
+        if (config == null) {
+            return false;
+        }
+        TeamPermissionPolicy.Requester actor =
+                new TeamPermissionPolicy.Requester(requester, true, false, 0);
+        TeamPermissionPolicy.TeamState team =
+                new TeamPermissionPolicy.TeamState(captainId, teamMembers, captainOnline);
+        if (!TeamPermissionPolicy.canClaimCaptain(
+                actor,
+                team,
+                captainOfflineSinceTick,
+                currentTick,
+                config.captainClaimThresholdTicks())) {
+            return false;
+        }
+        captainId = requester;
+        captainTransferTick = Math.max(0L, currentTick);
+        captainOnline = true;
+        captainOfflineSinceTick = -1L;
+        setDirty();
+        return true;
+    }
+
+    public Optional<TeamPermissionPolicy.Vote> pendingVote() {
+        return Optional.ofNullable(pendingTeamVote);
+    }
+
+    /** Starts a vote as the current captain using the safe default config. */
+    public TeamPermissionPolicy.VoteResult startVote(
+            TeamPermissionPolicy.Operation operation,
+            UUID requester,
+            long currentTick) {
+        return startVote(
+                operation,
+                requester,
+                0,
+                true,
+                false,
+                currentTick,
+                TeamPermissionPolicy.Config.defaults());
+    }
+
+    public TeamPermissionPolicy.VoteResult startVote(
+            TeamPermissionPolicy.Operation operation,
+            UUID requester,
+            long currentTick,
+            TeamPermissionPolicy.Config config) {
+        return startVote(
+                operation,
+                requester,
+                0,
+                true,
+                false,
+                currentTick,
+                config);
+    }
+
+    /** Full command-facing start path, including source/spectator/admin facts. */
+    public TeamPermissionPolicy.VoteResult startVote(
+            TeamPermissionPolicy.Operation operation,
+            UUID requester,
+            int permissionLevel,
+            boolean playerSource,
+            boolean spectator,
+            long currentTick,
+            TeamPermissionPolicy.Config config) {
+        if (operation == null || config == null || !config.allowsVote(operation)) {
+            return TeamPermissionPolicy.VoteResult.INVALID_OPERATION;
+        }
+        if (pendingTeamVote != null) {
+            if (pendingTeamVote.expiredAt(currentTick)) {
+                pendingTeamVote = null;
+                setDirty();
+            } else {
+                return TeamPermissionPolicy.VoteResult.ALREADY_PENDING;
+            }
+        }
+        TeamPermissionPolicy.Requester actor = new TeamPermissionPolicy.Requester(
+                requester,
+                playerSource,
+                spectator,
+                permissionLevel);
+        TeamPermissionPolicy.TeamState team =
+                new TeamPermissionPolicy.TeamState(captainId, teamMembers, captainOnline);
+        if (!TeamPermissionPolicy.canInitiateVote(operation, actor, team, config)) {
+            return TeamPermissionPolicy.VoteResult.NOT_ALLOWED;
+        }
+        long safeTick = Math.max(0L, currentTick);
+        long duration = config.voteDurationTicks();
+        long expiresAt = safeTick > Long.MAX_VALUE - duration
+                ? Long.MAX_VALUE
+                : safeTick + duration;
+        pendingTeamVote = new TeamPermissionPolicy.Vote(
+                operation,
+                requester,
+                safeTick,
+                expiresAt,
+                Set.of(),
+                Set.of());
+        setDirty();
+        return TeamPermissionPolicy.VoteResult.STARTED;
+    }
+
+    public TeamPermissionPolicy.VoteResult castVote(
+            UUID voter,
+            boolean yes,
+            long currentTick) {
+        if (pendingTeamVote == null) {
+            return TeamPermissionPolicy.VoteResult.NO_ACTIVE_VOTE;
+        }
+        if (pendingTeamVote.expiredAt(currentTick)) {
+            pendingTeamVote = null;
+            setDirty();
+            return TeamPermissionPolicy.VoteResult.EXPIRED;
+        }
+        if (voter == null || !isTeamMember(voter)) {
+            return TeamPermissionPolicy.VoteResult.NOT_ALLOWED;
+        }
+        if (pendingTeamVote.hasVoted(voter)) {
+            return TeamPermissionPolicy.VoteResult.ALREADY_VOTED;
+        }
+        TeamPermissionPolicy.Vote next = pendingTeamVote.cast(voter, yes);
+        if (TeamPermissionPolicy.votePassed(next, teamMembers)) {
+            pendingTeamVote = null;
+            setDirty();
+            return TeamPermissionPolicy.VoteResult.PASSED;
+        }
+        if (TeamPermissionPolicy.voteRejected(next, teamMembers)) {
+            pendingTeamVote = null;
+            setDirty();
+            return TeamPermissionPolicy.VoteResult.REJECTED;
+        }
+        pendingTeamVote = next;
+        setDirty();
+        return TeamPermissionPolicy.VoteResult.VOTE_RECORDED;
+    }
+
+    public TeamPermissionPolicy.VoteResult expirePendingVote(long currentTick) {
+        if (pendingTeamVote == null) {
+            return TeamPermissionPolicy.VoteResult.NO_ACTIVE_VOTE;
+        }
+        if (!pendingTeamVote.expiredAt(currentTick)) {
+            return TeamPermissionPolicy.VoteResult.PENDING;
+        }
+        pendingTeamVote = null;
+        setDirty();
+        return TeamPermissionPolicy.VoteResult.EXPIRED;
     }
 
     public Optional<MissionType> lastMainMissionType() {

@@ -7,6 +7,7 @@ import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
+import dev.ywsabc.lasttrain.campaign.TeamPermissionPolicy;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionBriefing;
 import dev.ywsabc.lasttrain.mission.MissionCommandPolicy;
@@ -22,6 +23,7 @@ import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
@@ -40,6 +42,32 @@ public final class LastTrainCommands {
                 .then(Commands.literal("start")
                         .requires(source -> source.hasPermission(2))
                         .executes(LastTrainCommands::start))
+                .then(Commands.literal("team")
+                        .then(Commands.literal("transfer")
+                                .then(Commands.argument("player", StringArgumentType.word())
+                                        .executes(LastTrainCommands::transferCaptain)))
+                        .then(Commands.literal("claim")
+                                .executes(LastTrainCommands::claimCaptain))
+                        .then(Commands.literal("vote")
+                                .then(Commands.literal("start")
+                                        .then(Commands.argument("operation", StringArgumentType.word())
+                                                .suggests((context, builder) -> {
+                                                    for (TeamPermissionPolicy.Operation operation
+                                                            : TeamPermissionPolicy.Operation.values()) {
+                                                        builder.suggest(operation.serializedName());
+                                                    }
+                                                    return builder.buildFuture();
+                                                })
+                                                .executes(LastTrainCommands::startTeamVote)))
+                                .then(Commands.literal("yes")
+                                        .executes(context -> castTeamVote(context, true)))
+                                .then(Commands.literal("no")
+                                        .executes(context -> castTeamVote(context, false))))
+                        // Short alias is useful for command users and keeps
+                        // the documented /team vote <yes|no> path intact.
+                        .then(Commands.literal("vote_start")
+                                .then(Commands.argument("operation", StringArgumentType.word())
+                                        .executes(LastTrainCommands::startTeamVote))))
                 .then(Commands.literal("advance_day")
                         .requires(source -> source.hasPermission(2))
                         .then(Commands.argument("days", IntegerArgumentType.integer(1, 100))
@@ -69,7 +97,6 @@ public final class LastTrainCommands {
                         .then(Commands.literal("turn_in")
                                 .executes(LastTrainCommands::turnInMission))
                         .then(Commands.literal("fail")
-                                .requires(source -> source.hasPermission(2))
                                 .executes(LastTrainCommands::failMission))
                         .then(Commands.literal("clear")
                                 .requires(source -> source.hasPermission(2))
@@ -118,7 +145,6 @@ public final class LastTrainCommands {
                         .then(Commands.literal("status")
                                 .executes(LastTrainCommands::recoverStatus))
                         .then(Commands.literal("train")
-                                .requires(source -> source.hasPermission(2))
                                 .executes(LastTrainCommands::recoverTrain))));
     }
 
@@ -151,7 +177,26 @@ public final class LastTrainCommands {
 
     private static int start(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
-        if (!data.start()) {
+        ServerPlayer starter = player(context);
+        if (starter == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_player"));
+            return 0;
+        }
+        if (starter.isSpectator()) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_team_member"));
+            return 0;
+        }
+        if (data.status() != CampaignStatus.NOT_STARTED) {
+            context.getSource().sendFailure(Component.translatable("command.lasttrain.already_started"));
+            return 0;
+        }
+        // A first player can issue the operator-gated bootstrap command before
+        // the login event has completed. Registration is idempotent and makes
+        // the identity check explicit before the campaign is started.
+        data.registerTeamMember(starter.getUUID());
+        if (!data.start(starter.getUUID())) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.already_started"));
             return 0;
         }
@@ -163,6 +208,9 @@ public final class LastTrainCommands {
     private static int advanceDay(CommandContext<CommandSourceStack> context) {
         int days = IntegerArgumentType.getInteger(context, "days");
         CampaignSavedData data = data(context);
+        if (!requireAdminTeamPlayer(context, data)) {
+            return 0;
+        }
         data.advanceDays(days);
         IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
         context.getSource().sendSuccess(
@@ -174,6 +222,9 @@ public final class LastTrainCommands {
     private static int advanceRoute(CommandContext<CommandSourceStack> context) {
         int segments = IntegerArgumentType.getInteger(context, "segments");
         CampaignSavedData data = data(context);
+        if (!requireAdminTeamPlayer(context, data)) {
+            return 0;
+        }
         data.advanceRoute(segments);
         context.getSource().sendSuccess(
                 () -> Component.translatable("command.lasttrain.route_advanced", data.routeSegment()),
@@ -227,6 +278,9 @@ public final class LastTrainCommands {
         }
 
         CampaignSavedData data = data(context);
+        if (!requireAdminTeamPlayer(context, data)) {
+            return 0;
+        }
         if (type.category() == MissionType.Category.OPTIONAL) {
             if (!data.proposeOptionalMission(type)) {
                 context.getSource().sendFailure(
@@ -249,6 +303,9 @@ public final class LastTrainCommands {
     private static int progressMission(CommandContext<CommandSourceStack> context) {
         int amount = IntegerArgumentType.getInteger(context, "amount");
         CampaignSavedData data = data(context);
+        if (!requireAdminTeamPlayer(context, data)) {
+            return 0;
+        }
         if (!data.addMissionProgress(amount)) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.no_progress"));
             return 0;
@@ -259,6 +316,9 @@ public final class LastTrainCommands {
 
     private static int turnInMission(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        if (requireTeamPlayer(context, data) == null) {
+            return 0;
+        }
         ActiveMission mission = data.activeMission();
         if (mission == null || mission.stage() != MissionStage.READY_TO_TURN_IN) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.not_ready"));
@@ -288,6 +348,12 @@ public final class LastTrainCommands {
 
     private static int failMission(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        if (!mayPerformTeamOperation(
+                context,
+                data,
+                TeamPermissionPolicy.Operation.ABANDON_MANDATORY_MISSION)) {
+            return 0;
+        }
         ActiveMission mission = data.activeMission();
         if (mission == null) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.none"));
@@ -316,6 +382,9 @@ public final class LastTrainCommands {
 
     private static int clearMission(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        if (!requireAdminTeamPlayer(context, data)) {
+            return 0;
+        }
         ActiveMission mission = data.activeMission();
         if (mission == null) {
             context.getSource().sendFailure(Component.translatable("command.lasttrain.mission.none"));
@@ -332,6 +401,248 @@ public final class LastTrainCommands {
                 () -> Component.translatable("command.lasttrain.mission.cleared"),
                 true);
         return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // Team captain, permission gates and votes
+    // ------------------------------------------------------------------
+
+    private static int transferCaptain(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        ServerPlayer requester = requireTeamPlayer(context, data);
+        if (requester == null) {
+            return 0;
+        }
+        String rawTarget = StringArgumentType.getString(context, "player");
+        ServerPlayer target = findOnlinePlayer(
+                context.getSource().getServer(),
+                rawTarget);
+        UUID targetId = target == null ? parseId(context, rawTarget) : target.getUUID();
+        if (targetId == null
+                || !data.isTeamMember(targetId)
+                || target != null && target.isSpectator()) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.invalid_target"));
+            return 0;
+        }
+        if (!data.transferCaptain(
+                requester.getUUID(),
+                targetId,
+                context.getSource().getServer().overworld().getGameTime(),
+                target != null)) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_captain"));
+            return 0;
+        }
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.team.transferred",
+                        target == null ? rawTarget : target.getGameProfile().getName()),
+                true);
+        return 1;
+    }
+
+    private static int claimCaptain(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        ServerPlayer requester = requireTeamPlayer(context, data);
+        if (requester == null) {
+            return 0;
+        }
+        if (!data.claimCaptain(
+                requester.getUUID(),
+                context.getSource().getServer().overworld().getGameTime(),
+                TeamPermissionPolicy.Config.defaults())) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.claim_refused"));
+            return 0;
+        }
+        context.getSource().sendSuccess(
+                () -> Component.translatable("command.lasttrain.team.claimed"),
+                true);
+        return 1;
+    }
+
+    private static int startTeamVote(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        ServerPlayer requester = requireTeamPlayer(context, data);
+        if (requester == null) {
+            return 0;
+        }
+        TeamPermissionPolicy.Operation operation = TeamPermissionPolicy.Operation.parse(
+                StringArgumentType.getString(context, "operation"));
+        if (operation == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.invalid_operation"));
+            return 0;
+        }
+        TeamPermissionPolicy.Config config = TeamPermissionPolicy.Config.defaults();
+        TeamPermissionPolicy.VoteResult result = data.startVote(
+                operation,
+                requester.getUUID(),
+                permissionLevel(context),
+                true,
+                requester.isSpectator(),
+                context.getSource().getServer().overworld().getGameTime(),
+                config);
+        switch (result) {
+            case STARTED -> {
+                context.getSource().sendSuccess(
+                        () -> Component.translatable(
+                                "command.lasttrain.team.vote_started",
+                                operation.serializedName()),
+                        true);
+                return 1;
+            }
+            case ALREADY_PENDING -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_pending"));
+            case INVALID_OPERATION -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_not_supported"));
+            default -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_captain"));
+        }
+        return 0;
+    }
+
+    private static int castTeamVote(
+            CommandContext<CommandSourceStack> context,
+            boolean yes) {
+        CampaignSavedData data = data(context);
+        ServerPlayer requester = requireTeamPlayer(context, data);
+        if (requester == null) {
+            return 0;
+        }
+        TeamPermissionPolicy.Operation votedOperation = data.pendingVote()
+                .map(TeamPermissionPolicy.Vote::operation)
+                .orElse(null);
+        TeamPermissionPolicy.VoteResult result = data.castVote(
+                requester.getUUID(),
+                yes,
+                context.getSource().getServer().overworld().getGameTime());
+        switch (result) {
+            case VOTE_RECORDED -> {
+                context.getSource().sendSuccess(
+                        () -> Component.translatable("command.lasttrain.team.vote_recorded"),
+                        false);
+                return 1;
+            }
+            case PASSED -> {
+                context.getSource().sendSuccess(
+                        () -> Component.translatable("command.lasttrain.team.vote_passed"),
+                        true);
+                if (votedOperation == TeamPermissionPolicy.Operation.ABANDON_MANDATORY_MISSION) {
+                    applyPassedTeamVote(context, data);
+                }
+                return 1;
+            }
+            case REJECTED -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_rejected"));
+            case EXPIRED -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_expired"));
+            case ALREADY_VOTED -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_already_cast"));
+            case NO_ACTIVE_VOTE -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_none"));
+            default -> context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_team_member"));
+        }
+        return 0;
+    }
+
+    /** Applies the one P5 vote-backed operation whose world mutation exists. */
+    private static void applyPassedTeamVote(
+            CommandContext<CommandSourceStack> context,
+            CampaignSavedData data) {
+        // The durable state machine removes a passed vote, so the command
+        // itself remains the final authority for the operation's live target.
+        // A future operation (for example endless mode in P6) can add its
+        // handler here without changing vote accounting.
+        ActiveMission mission = data.activeMission();
+        if (mission == null
+                || data.isFinaleMission(mission)
+                || !MissionWorldDirector.clearMissionWorld(
+                        context.getSource().getServer().overworld(),
+                        mission)) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.vote_target_unavailable"));
+            return;
+        }
+        if (data.failMission(MissionFallbackPolicy.THREAT_PENALTY)) {
+            IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
+            context.getSource().sendSuccess(
+                    () -> Component.translatable(
+                            "command.lasttrain.mission.failed",
+                            data.threat()),
+                    true);
+        }
+    }
+
+    private static boolean mayPerformTeamOperation(
+            CommandContext<CommandSourceStack> context,
+            CampaignSavedData data,
+            TeamPermissionPolicy.Operation operation) {
+        ServerPlayer requester = requireTeamPlayer(context, data);
+        if (requester == null) {
+            return false;
+        }
+        TeamPermissionPolicy.Decision decision = TeamPermissionPolicy.decide(
+                operation,
+                teamRequester(context, requester, data),
+                teamState(context.getSource().getServer(), data),
+                TeamPermissionPolicy.Config.defaults());
+        if (decision == TeamPermissionPolicy.Decision.ALLOW) {
+            return true;
+        }
+        context.getSource().sendFailure(Component.translatable(
+                decision == TeamPermissionPolicy.Decision.NEED_VOTE
+                        ? "command.lasttrain.team.requires_vote"
+                        : "command.lasttrain.team.requires_captain"));
+        return false;
+    }
+
+    private static ServerPlayer requireTeamPlayer(
+            CommandContext<CommandSourceStack> context,
+            CampaignSavedData data) {
+        ServerPlayer requester = player(context);
+        if (requester == null) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_player"));
+            return null;
+        }
+        if (requester.isSpectator() || !data.isTeamMember(requester.getUUID())) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_team_member"));
+            return null;
+        }
+        return requester;
+    }
+
+    private static boolean requireAdminTeamPlayer(
+            CommandContext<CommandSourceStack> context,
+            CampaignSavedData data) {
+        if (requireTeamPlayer(context, data) == null) {
+            return false;
+        }
+        if (!context.getSource().hasPermission(TeamPermissionPolicy.ADMIN_PERMISSION_LEVEL)) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.team.requires_captain"));
+            return false;
+        }
+        return true;
+    }
+
+    private static ServerPlayer findOnlinePlayer(MinecraftServer server, String rawNameOrId) {
+        if (rawNameOrId == null || rawNameOrId.isBlank()) {
+            return null;
+        }
+        try {
+            UUID id = UUID.fromString(rawNameOrId);
+            return server.getPlayerList().getPlayer(id);
+        } catch (IllegalArgumentException ignored) {
+            return server.getPlayerList().getPlayers().stream()
+                    .filter(candidate -> candidate.getGameProfile().getName().equalsIgnoreCase(rawNameOrId))
+                    .findFirst()
+                    .orElse(null);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -471,6 +782,36 @@ public final class LastTrainCommands {
         return context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
     }
 
+    private static int permissionLevel(CommandContext<CommandSourceStack> context) {
+        return context.getSource().hasPermission(TeamPermissionPolicy.ADMIN_PERMISSION_LEVEL)
+                ? TeamPermissionPolicy.ADMIN_PERMISSION_LEVEL
+                : 0;
+    }
+
+    private static TeamPermissionPolicy.Requester teamRequester(
+            CommandContext<CommandSourceStack> context,
+            ServerPlayer player,
+            CampaignSavedData data) {
+        return new TeamPermissionPolicy.Requester(
+                player.getUUID(),
+                true,
+                player.isSpectator(),
+                permissionLevel(context));
+    }
+
+    private static TeamPermissionPolicy.TeamState teamState(
+            MinecraftServer server,
+            CampaignSavedData data) {
+        ServerPlayer captain = data.captainId() == null
+                ? null
+                : server.getPlayerList().getPlayer(data.captainId());
+        boolean captainOnline = captain != null && !captain.isSpectator();
+        return new TeamPermissionPolicy.TeamState(
+                data.captainId(),
+                data.teamMembers(),
+                captainOnline);
+    }
+
     private static MissionCommandPolicy.Actor actor(
             CommandContext<CommandSourceStack> context,
             ServerPlayer player,
@@ -512,6 +853,12 @@ public final class LastTrainCommands {
 
     private static int recoverTrain(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
+        if (!mayPerformTeamOperation(
+                context,
+                data,
+                TeamPermissionPolicy.Operation.TRAIN_RECOVERY)) {
+            return 0;
+        }
         if (!data.applyTrainRescue()) {
             context.getSource().sendFailure(
                     Component.translatable("command.lasttrain.recover.refused"));

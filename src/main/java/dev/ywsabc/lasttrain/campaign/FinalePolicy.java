@@ -14,10 +14,11 @@ public final class FinalePolicy {
     /**
      * Schema 7 added the optional mission system (proposals, optional mission
      * list, reward receipts, pending site cleanups, mission history and team
-     * membership). All new fields load with safe empty defaults, so older
-     * saves need no data migration; only the schema number advances.
+     * membership). Schema 8 adds captain hand-off timestamps and the durable
+     * in-session vote record; old saves use safe empty/default values and
+     * pending votes are intentionally discarded on reload.
      */
-    public static final int CURRENT_SCHEMA = 7;
+    public static final int CURRENT_SCHEMA = 8;
     public static final int FINAL_DAY = 100;
     public static final int FINALE_HUB_START_DAY = 90;
     public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;
