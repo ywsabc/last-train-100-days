@@ -133,10 +133,14 @@ public final class CampaignPacingPolicy {
         return nextKeyMission(day, routeSegment, committedKeyMissions);
     }
 
+    /**
+     * The single authoritative mainline criterion, delegated to
+     * {@link MissionType#blocksRoute()}: only MAIN missions are mainline
+     * obstacles. Support missions (supply recovery) occupy the same slot but
+     * never count as roadblocks, so the final window can still offer them.
+     */
     public static boolean isMainlineMission(MissionType type) {
-        return type == MissionType.RAIL_BREAK
-                || type == MissionType.STATION_POWER
-                || type == MissionType.STATION_GATE;
+        return Objects.requireNonNull(type, "type").blocksRoute();
     }
 
     public static boolean allowsMainlineMission(int day) {

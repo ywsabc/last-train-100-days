@@ -218,6 +218,21 @@ lastError
 
 任何状态变更后调用 `setDirty()`。所有集合设置明确的最大反序列化数量，加载时拒绝或隔离异常值，避免损坏 NBT 导致内存失控。
 
+已实现（schema 10）：路线计划状态持久化在 `lasttrain_campaign` 中，包含：
+
+- `routeRulesVersion`：该战役承诺的确定性路线规则版本。新战役使用当前
+  `DEFAULT_ROUTE_RULES_VERSION`（2）；存档缺省该键的是旧世界，固定使用
+  历史版本 1，直到管理员显式迁移（`adoptRouteRulesVersion`），绝不自动升级。
+- `route_plan_state`：配置摘要（SHA-256 盐两半）、滚动规划游标（下一待规划区段、
+  最近车站/城市/桥隧）与“已规划未实现”的区段计划列表（模板、POI 槽位、出口）。
+- 已实现的区段在落块后从待实现列表裁掉；区段计划按
+  `(campaignSeed, routeIndex, routeRulesVersion, configSeedSalt, segmentIndex)`
+  确定性重导，因此重启后同 seed 区段完全一致，已承诺计划从不回抽。
+
+`RouteSavedData` 的独立拆分仍是目标形态（路线随里程增长），MVP 只在
+`lasttrain_campaign` 内保存不超过一个前向窗口的待实现计划，避免每 tick 重写
+完整区段列表。
+
 ### 5.2 线程规则
 
 - SavedData 的读写、第三方轨道图访问、方块放置、实体生成只在服务器线程。
@@ -327,6 +342,14 @@ missionSeed = hash(segmentSeed, "mission", slotIndex)
 ```
 
 `configSeedSalt` 是配置 11 个字段序列的 SHA-256 摘要拆成的两个 long，任一字段变化都会改变摘要；rules version 1 为历史草案（SplittableRandom 且不混入配置字段），version 2 起使用 `java.util.Random` 并混入全字段摘要。单 long 指纹折叠已被证明必然碰撞（2^93 种配置无法单射进 2^64），不再使用。
+
+已实现：两阶段模型已接入生产 `RouteDirector`。`generateSegment` 不再硬编码
+固定直线与固定站台，而是读取（必要时先用 `RouteSegmentPlanner` 前向规划并
+持久化）该区段的 `RouteSegmentPlan`，由纯计算层 `RouteSegmentLayout` 把模板映射
+成几何与 POI 锚点——车站模板把站台建在计划车站 POI 锚点上，桥隧模板加密支撑柱
+并取消站台，城市绕行模板在支线出口铺出支线平台——真实方块放置仍走既有
+TongDa/Create 适配器。同一 seed 保存重载后区段一致由测试钉死。规则版本入存档后，
+旧世界继续用 version 1（历史算法分支，golden 测试钉死输出），不回抽已承诺计划。
 
 ### 7.2 生成窗口
 
@@ -513,7 +536,7 @@ JAR SHA-256；没有匹配校验值就拒绝安装。
 ```text
 definitionId
 definitionVersion
-category                // MAIN_BLOCKER | OPTIONAL | AMBIENT
+category                // MAIN_BLOCKER | SUPPORT | OPTIONAL | AMBIENT
 selectionConditions
 weight
 exclusiveTags
@@ -525,6 +548,11 @@ failurePolicy
 scalingPolicy
 recoveryPolicy
 ```
+
+`MAIN_BLOCKER` 任务占用唯一主线槽并持有路线检查点；`SUPPORT` 任务（如补给回收）
+占用同一个槽但不阻塞路线，因此终局窗口仍可提供补给；`OPTIONAL` 任务以提议形式
+并排运行，永不占用主线槽。三者的权威判据收敛在 `MissionType.blocksRoute()` 与
+`MissionType.occupiesMainlineSlot()` 上，导演、池约束与节奏策略都只调用这一处。
 
 任务实例在首次选择时保存 `definitionId`、`definitionVersion`、随机参数和难度快照。`/reload` 可以影响以后生成的任务，但不得无迁移地改变已经激活的任务。
 
@@ -752,8 +780,9 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 
 ### 15.2 迁移规则
 
-以下是目标迁移规则。当前代码只有 schema 6 字段和 v5→v6 终局状态迁移；
-尚无通用逐版链，也不会对高于当前版本的 schema 执行 fail-closed。
+以下是目标迁移规则。当前代码有 schema 6 字段与 v5→v6 终局状态迁移，以及
+schema 7–10 的可选任务、队伍权限、战役模式与路线计划状态（各自带缺省值，旧档
+加载安全）；尚无通用逐版链，也不会对高于当前版本的 schema 执行 fail-closed。
 
 - 迁移链逐版执行，例如 v1 → v2 → v3，不写跨多版猜测逻辑。
 - 每一步纯粹、幂等、有单元测试，并保留迁移前版本号直到验证完成。
@@ -762,6 +791,13 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 - 已生成区段保留自己的定义版本；更新只影响未规划区段。
 - 活动任务保留定义快照所需参数，数据包删掉旧定义时仍能完成或进入受控取消流程。
 - 路线算法更新时增加 `routeRulesVersion`，不得重新解释已生成区段的种子。
+
+已实现（R2）：`routeRulesVersion` 持久化进 `lasttrain_campaign`；缺省的旧存档
+固定为历史版本 1 且不自动升级，新战役使用当前版本 2。`RouteSegmentPlanner` 提供
+version 1 历史分支（SplittableRandom + 种子不含配置字段），输出由 golden 测试
+钉死；version 2 保持 `java.util.Random` + SHA-256 全字段盐。显式迁移通过
+`CampaignSavedData.adoptRouteRulesVersion` 完成：已承诺的待实现计划保留，只有
+其后新规划的区段换用新版本。
 
 ### 15.3 后端迁移
 
@@ -846,12 +882,15 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
   不持久化，重载必然回到生产日长；`enable/disable`、`advanceActiveTicks(long)`
   与 `simulateDay()`（一天内全部 tick 依次执行）未 opt-in 时抛异常，生产
   服务器 tick 循环不调用任何入口；`simulateDay()` 与逐 tick 推进的等价性由
-  测试保证。
+  测试保证。`enable` 另有环境门禁：无 `-Dlasttrain.devTools=true` 启动参数的
+  启动（即生产环境）直接拒绝，未启用时成本为零。
 - `FaultInjection`：可注入故障开关（`FailurePoint` × failCount/always），
   覆盖任务场地生成失败、存档损坏条目、区块卸载中的任务结算、奖励落盘
   PENDING 悬挂、路线区段生成失败、载具栈缺失（SAFE_MODE）。默认全关，
-  未注册时热路径为单次 volatile 读；注入后一律走既有降级路径（SAFE_MODE、
-  任务 fallback、奖励 outbox 重试），解除注入立即恢复。
+  未注册时热路径为单次 volatile 读——极低固定开销而非零开销；`register`/
+  `registerAlways` 同样受 `-Dlasttrain.devTools=true` 环境门禁保护。注入后
+  一律走既有降级路径（SAFE_MODE、任务 fallback、奖励 outbox 重试），解除注入
+  立即恢复。
 - 100 天全流程状态机冒烟测试：NOT_STARTED → COMPLETED（终局双门）→
   ENDLESS 继续生成，全程仅策略层/保存数据层断言 day/路线单调、threat 有界、
   任务槽互斥。
@@ -965,8 +1004,10 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 1. 一个服务器权威核心模组和一份 `CampaignSavedData`；
 2. 一个代码生成的固定起始站、共享补给箱和每玩家一次性物资；
 3. 一辆由 Simurail Ponder 结构扩展出的 24 方块 Sable 物理验证车；
-4. 通过 TongDa Track Spawner 实现的 64 格东向直线区段，保持列车前方两段并设
-   400,000 段安全上限；
+4. 通过 TongDa Track Spawner 实现的 64 格东向区段，保持列车前方两段并设
+   400,000 段安全上限；区段模板（直线/车站/城市绕行/桥隧）由
+   `RouteSegmentPlanner` 计划并持久化，`RouteDirector` 按计划落地（车站站台、
+   桥隧支撑、城市支线出口），旧存档固定历史规则版本 1、新战役使用版本 2；
 5. 断轨、供电、站门、补给回收和尸群清理五种代码定义的任务现场；
 6. `/lasttrain status`、战役推进和任务管理命令；
 7. 1–6 人有效队伍数滑窗和按创建时人数冻结的任务目标缩放；材料型目标按
@@ -983,6 +1024,14 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
     `/lasttrain recover status|train` 提供诊断与登记，实际归位/重建仍待
     物理载具后端；
 11. 核心单元测试、安装器故障测试，以及不接受 EULA 的专服模组发现冒烟测试。
+12. 统一主线判据：`MissionType.blocksRoute()` 是唯一权威来源，节奏策略与池约束
+    都调用它；补给回收改为不阻塞路线的支援类（仍占用唯一任务槽、仍在任务池中），
+    因此第 90–99 天终局窗口内不再生成任何阻塞路线的新任务，只允许支援/可选任务；
+13. 第 100 天终局清算：清空非阻塞任务槽前先登记 deferred cleanup（复用
+    PendingSiteCleanup 队列，依赖区块加载时延迟执行），不遗留任务世界现场；
+14. 开发环境门禁：`FastForwardMode.enable` 与 `FaultInjection.register` 在无
+    `-Dlasttrain.devTools=true` 启动参数时直接拒绝，生产路径成本为极低固定开销
+    （单次 volatile 读），不再是零开销口径。
 
 该切片已经覆盖构建、依赖固定、安装安全和纯状态策略；尚未验证进入真实世界后的
 列车装配/行驶、Create 轨道图拓扑、单人/LAN/多人重连、长期存档或百日完整流程，

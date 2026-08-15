@@ -196,6 +196,10 @@ tasks.withType(JavaCompile).configureEach {
 
 tasks.named('test', Test).configure {
     useJUnitPlatform()
+    // Unit tests are a development environment: the explicit startup
+    // parameter opts them into the dev-only entry points (FastForwardMode,
+    // FaultInjection) that production launches refuse without it.
+    systemProperty 'lasttrain.devTools', 'true'
 }
 
 // NeoForm recipes intentionally choose generous heaps for decompilers. This

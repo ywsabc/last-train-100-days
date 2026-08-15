@@ -116,6 +116,24 @@ class FaultInjectionTest {
     }
 
     @Test
+    void registerRefusesOutsideADevelopmentEnvironment() {
+        System.clearProperty(DevToolsGate.SYSTEM_PROPERTY);
+        try {
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> FaultInjection.register(
+                            FaultInjection.FailurePoint.REWARD_PERSIST, 1));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> FaultInjection.registerAlways(
+                            FaultInjection.FailurePoint.REWARD_PERSIST));
+            assertFalse(FaultInjection.anyRegistered());
+        } finally {
+            System.setProperty(DevToolsGate.SYSTEM_PROPERTY, "true");
+        }
+    }
+
+    @Test
     void concurrentConsumptionDeliversExactlyTheRegisteredFailures() throws Exception {
         FaultInjection.FailurePoint point = FaultInjection.FailurePoint.SAVE_LOAD_CORRUPT_ENTRY;
         FaultInjection.register(point, 1_000);

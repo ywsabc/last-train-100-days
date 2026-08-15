@@ -7,16 +7,17 @@ import java.util.Optional;
 /**
  * Mission definitions for the campaign director.
  *
- * <p>{@link Category#MAIN} missions occupy the single route-blocking mission
- * slot and act as progression checkpoints. {@link Category#OPTIONAL} missions
- * run beside the main line, are offered as proposals first and never block
- * route progress.</p>
+ * <p>{@link Category#MAIN} missions occupy the single mission slot, act as
+ * progression checkpoints and block the route. {@link Category#SUPPORT}
+ * missions occupy the same single slot but never block route progress (the
+ * fuel/supply guarantee). {@link Category#OPTIONAL} missions run beside the
+ * main line, are offered as proposals first and never occupy the slot.</p>
  */
 public enum MissionType {
     RAIL_BREAK("rail_break", 3, Category.MAIN),
     STATION_POWER("station_power", 4, Category.MAIN),
     STATION_GATE("station_gate", 2, Category.MAIN),
-    SUPPLY_RECOVERY("supply_recovery", 5, Category.MAIN),
+    SUPPLY_RECOVERY("supply_recovery", 5, Category.SUPPORT),
     ZOMBIE_BLOCKADE("zombie_blockade", 12, Category.MAIN),
     RESCUE_SURVIVOR("rescue_survivor", 1, Category.OPTIONAL),
     SALVAGE_CAR("salvage_car", 6, Category.OPTIONAL);
@@ -44,11 +45,17 @@ public enum MissionType {
     }
 
     /**
-     * Only mainline missions hold the route checkpoint. Optional missions and
-     * unaccepted proposals must never stop the train from progressing.
+     * The single authoritative mainline criterion: only MAIN missions hold
+     * the route checkpoint. SUPPORT, OPTIONAL and unaccepted proposal
+     * missions must never stop the train from progressing.
      */
     public boolean blocksRoute() {
         return category == Category.MAIN;
+    }
+
+    /** True for every mission that occupies the single mainline mission slot. */
+    public boolean occupiesMainlineSlot() {
+        return category != Category.OPTIONAL;
     }
 
     /** Missions whose own reward loop guarantees a material safety net. */
@@ -64,7 +71,11 @@ public enum MissionType {
     }
 
     public enum Category {
+        /** Route-blocking progression checkpoint. */
         MAIN,
+        /** Occupies the mainline slot but never blocks the route. */
+        SUPPORT,
+        /** Side mission offered as a proposal; never occupies the mainline slot. */
         OPTIONAL
     }
 }

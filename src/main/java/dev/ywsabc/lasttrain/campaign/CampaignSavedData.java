@@ -8,6 +8,9 @@ import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.OptionalMissionPolicy;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
+import dev.ywsabc.lasttrain.route.RouteSegmentPlan;
+import dev.ywsabc.lasttrain.route.RouteSegmentPlanner;
+import dev.ywsabc.lasttrain.route.RouteTemplateConfig;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
@@ -17,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SplittableRandom;
@@ -24,6 +28,7 @@ import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.IntTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
@@ -45,6 +50,10 @@ public final class CampaignSavedData extends SavedData {
     public static final int MAX_OPTIONAL_MISSIONS_ON_LOAD = 8;
     public static final int MAX_PENDING_CLEANUPS = 64;
     public static final int MAX_TEAM_MEMBERS = 128;
+    /** How many segments ahead of the realized head the planner commits. */
+    public static final int DEFAULT_ROUTE_PLAN_AHEAD = 8;
+    /** Hard deserialization cap for the pending route plan list. */
+    public static final int MAX_ROUTE_PLANS_ON_LOAD = 1024;
     private static final String DATA_NAME = LastTrain.MOD_ID + "_campaign";
     private static final Factory<CampaignSavedData> FACTORY =
             new Factory<>(CampaignSavedData::new, CampaignSavedData::load);
@@ -52,6 +61,22 @@ public final class CampaignSavedData extends SavedData {
     private int schemaVersion = CURRENT_SCHEMA;
     private UUID campaignId = UUID.randomUUID();
     private long campaignSeed;
+    /**
+     * Deterministic route rules version this campaign commits its plans with.
+     * New campaigns start on {@link RouteSegmentPlanner#DEFAULT_ROUTE_RULES_VERSION};
+     * saves without the key are old worlds and keep version 1 until an
+     * explicit {@link #adoptRouteRulesVersion} migration.
+     */
+    private int routeRulesVersion = RouteSegmentPlanner.DEFAULT_ROUTE_RULES_VERSION;
+    /** SHA-256 salt halves of the config used for the last plan extension. */
+    private long routePlanConfigSaltLo;
+    private long routePlanConfigSaltHi;
+    /** Persisted rolling planner state after the last planned segment. */
+    private RouteSegmentPlanner.Cursor routePlanCursor = RouteSegmentPlanner.Cursor.fresh();
+    /** Pending plans for segments above {@code generatedRouteSegment}. */
+    private final List<RouteSegmentPlan> routePlans = new ArrayList<>();
+    /** Memory-only planner, rebuilt lazily from the persisted state. */
+    private RouteSegmentPlanner routePlanner;
     private CampaignMode mode = CampaignMode.STORY_100_DAYS;
     private CampaignStatus status = CampaignStatus.NOT_STARTED;
     private int day = 1;
@@ -125,6 +150,11 @@ public final class CampaignSavedData extends SavedData {
             data.campaignId = UUID.randomUUID();
         }
         data.campaignSeed = tag.getLong("campaign_seed");
+        // Route rules version: a save without the key is a pre-planner world
+        // and commits to the historical version 1; it never auto-upgrades.
+        data.routeRulesVersion = tag.contains("route_rules_version")
+                ? Math.max(1, tag.getInt("route_rules_version"))
+                : 1;
         data.mode = CampaignMode.fromSerializedName(tag.getString("mode"));
         data.status = CampaignStatus.fromSerializedName(tag.getString("status"));
         data.day = Math.clamp(tag.getInt("day"), 1, maxDay(data.mode));
@@ -206,6 +236,7 @@ public final class CampaignSavedData extends SavedData {
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         loadOptionalState(tag, registries, data);
+        loadRoutePlanState(tag, data);
         data.migrateFinaleState(loadedSchema);
         return data;
     }
@@ -215,6 +246,7 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("schema_version", CURRENT_SCHEMA);
         tag.putString("campaign_id", campaignId.toString());
         tag.putLong("campaign_seed", campaignSeed);
+        tag.putInt("route_rules_version", routeRulesVersion);
         tag.putString("mode", mode.serializedName());
         tag.putString("status", status.name());
         tag.putInt("day", day);
@@ -258,6 +290,7 @@ public final class CampaignSavedData extends SavedData {
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
         saveOptionalState(tag, registries);
+        saveRoutePlanState(tag);
         return tag;
     }
 
@@ -449,6 +482,241 @@ public final class CampaignSavedData extends SavedData {
         if (pendingTeamVote != null) {
             tag.put("pending_team_vote", saveVote(pendingTeamVote));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Durable route plan state (schema 10): plan → realize two phases.
+    // Pending plans, the config salt and the rolling planner cursor are
+    // persisted so committed plans are adopted as-is on reload; realized
+    // segments are trimmed from the pending list and never re-planned.
+    // ------------------------------------------------------------------
+
+    /**
+     * The deterministic route rules version this campaign commits its plans
+     * with. New campaigns start on
+     * {@link RouteSegmentPlanner#DEFAULT_ROUTE_RULES_VERSION}; saves without
+     * the key are old worlds and keep version 1 until
+     * {@link #adoptRouteRulesVersion} is called explicitly.
+     */
+    public int routeRulesVersion() {
+        return routeRulesVersion;
+    }
+
+    /**
+     * Plans {@code segment} forward and returns its committed plan. When the
+     * committed plan list does not reach far enough (a new campaign, or
+     * progress past the planned horizon), the planner extends it by at least
+     * {@link #DEFAULT_ROUTE_PLAN_AHEAD} segments under the campaign's
+     * {@link #routeRulesVersion} and the extension is persisted.
+     *
+     * @throws IllegalArgumentException when the segment was already realized
+     */
+    public RouteSegmentPlan routePlan(int segment) {
+        if (segment < 1) {
+            throw new IllegalArgumentException("Route segments start at 1");
+        }
+        if (segment <= generatedRouteSegment) {
+            throw new IllegalArgumentException(
+                    "Route segment " + segment + " was already realized and cannot be re-planned");
+        }
+        RouteSegmentPlanner planner = routePlanner();
+        int target = Math.min(
+                MAX_ROUTE_SEGMENT,
+                Math.max(segment, generatedRouteSegment + DEFAULT_ROUTE_PLAN_AHEAD));
+        if (planner.lastPlannedSegment() < target) {
+            planner.plan(target);
+            persistRoutePlanState();
+        }
+        return planner.plan(segment);
+    }
+
+    /** Pending (planned, not yet realized) route plans, in segment order. */
+    public List<RouteSegmentPlan> plannedRouteSegments() {
+        return List.copyOf(routePlans);
+    }
+
+    /**
+     * Trims the persisted pending plan list after segment {@code segment} was
+     * realized. The planner keeps its memoized copy for the session; only the
+     * durable list is trimmed.
+     */
+    public void dropRoutePlanThrough(int segment) {
+        if (routePlans.removeIf(plan -> plan.segmentIndex() <= segment)) {
+            setDirty();
+        }
+    }
+
+    /**
+     * Replaces the entire committed plan state with externally produced plans
+     * (test and content tooling entry point). Only valid before any route
+     * segment has been realized: the plans must be ordered, contiguous and
+     * start at segment 1.
+     */
+    public void commitRoutePlans(List<RouteSegmentPlan> plans) {
+        Objects.requireNonNull(plans, "plans");
+        if (generatedRouteSegment > 0) {
+            throw new IllegalStateException(
+                    "Route plans can only be committed before any segment is realized");
+        }
+        int expected = 1;
+        for (RouteSegmentPlan plan : plans) {
+            if (plan == null || plan.segmentIndex() != expected) {
+                throw new IllegalArgumentException(
+                        "Committed route plans must be contiguous from segment 1, expected "
+                                + expected);
+            }
+            expected++;
+        }
+        routePlans.clear();
+        routePlans.addAll(plans);
+        routePlanCursor = deriveCursor(plans);
+        routePlanner = null;
+        setDirty();
+    }
+
+    /**
+     * Explicitly adopts a newer route rules version. Committed pending plans
+     * stay; only segments planned afterwards use the new version, so an
+     * existing world never silently re-rolls its committed route.
+     */
+    public boolean adoptRouteRulesVersion(int version) {
+        if (version < 1 || version == routeRulesVersion) {
+            return false;
+        }
+        routeRulesVersion = version;
+        routePlanner = null;
+        setDirty();
+        return true;
+    }
+
+    private RouteSegmentPlanner routePlanner() {
+        if (routePlanner != null) {
+            return routePlanner;
+        }
+        if (routePlans.isEmpty() && routePlanCursor.nextSegment() <= 1) {
+            // No committed plan state yet: a fresh campaign or a pre-planner
+            // world whose realized segments are simply not retained.
+            routePlanner = new RouteSegmentPlanner(
+                    campaignSeed,
+                    RouteSegmentPlanner.DEFAULT_ROUTE_INDEX,
+                    routeRulesVersion,
+                    RouteTemplateConfig.DEFAULT);
+            return routePlanner;
+        }
+        try {
+            routePlanner = RouteSegmentPlanner.resume(
+                    campaignSeed,
+                    RouteSegmentPlanner.DEFAULT_ROUTE_INDEX,
+                    routeRulesVersion,
+                    RouteTemplateConfig.DEFAULT,
+                    generatedRouteSegment,
+                    routePlanCursor,
+                    routePlans);
+        } catch (IllegalArgumentException inconsistent) {
+            LastTrain.LOGGER.warn(
+                    "Route plan state is inconsistent ({}); future segments are re-derived "
+                            + "deterministically from the campaign seed",
+                    inconsistent.getMessage());
+            routePlans.clear();
+            routePlanCursor = RouteSegmentPlanner.Cursor.fresh();
+            routePlanner = new RouteSegmentPlanner(
+                    campaignSeed,
+                    RouteSegmentPlanner.DEFAULT_ROUTE_INDEX,
+                    routeRulesVersion,
+                    RouteTemplateConfig.DEFAULT);
+        }
+        return routePlanner;
+    }
+
+    private void persistRoutePlanState() {
+        RouteSegmentPlanner planner = routePlanner;
+        if (planner == null) {
+            return;
+        }
+        routePlans.clear();
+        routePlans.addAll(planner.plansAbove(generatedRouteSegment));
+        routePlanCursor = planner.cursor();
+        RouteTemplateConfig.SeedSalt salt = RouteTemplateConfig.DEFAULT.seedSalt();
+        if ((routePlanConfigSaltLo != 0L || routePlanConfigSaltHi != 0L)
+                && (routePlanConfigSaltLo != salt.lo() || routePlanConfigSaltHi != salt.hi())) {
+            // Committed pending plans stay; the new config digest only enters
+            // the seed of segments planned from now on.
+            LastTrain.LOGGER.warn(
+                    "Route template config changed since the last plan commit; future route "
+                            + "segments re-roll under the new config digest");
+        }
+        routePlanConfigSaltLo = salt.lo();
+        routePlanConfigSaltHi = salt.hi();
+        setDirty();
+    }
+
+    private static RouteSegmentPlanner.Cursor deriveCursor(List<RouteSegmentPlan> plans) {
+        int nextSegment = 1;
+        int lastStation = 1;
+        int lastCity = 0;
+        List<Integer> bridges = new ArrayList<>();
+        for (RouteSegmentPlan plan : plans) {
+            nextSegment = Math.max(nextSegment, plan.segmentIndex() + 1);
+            switch (plan.template()) {
+                case STATION -> lastStation = Math.max(lastStation, plan.segmentIndex());
+                case CITY_BYPASS -> lastCity = Math.max(lastCity, plan.segmentIndex());
+                case BRIDGE_TUNNEL -> bridges.add(plan.segmentIndex());
+                default -> {
+                }
+            }
+        }
+        int window = RouteTemplateConfig.DEFAULT.bridgeTunnelWindow();
+        int next = nextSegment;
+        bridges.removeIf(bridge -> bridge <= next - 1 - window);
+        return new RouteSegmentPlanner.Cursor(nextSegment, lastStation, lastCity, bridges);
+    }
+
+    private static void loadRoutePlanState(CompoundTag tag, CampaignSavedData data) {
+        CompoundTag state = tag.getCompound("route_plan_state");
+        if (state.isEmpty()) {
+            return;
+        }
+        data.routePlanConfigSaltLo = state.getLong("config_salt_lo");
+        data.routePlanConfigSaltHi = state.getLong("config_salt_hi");
+        CompoundTag cursorTag = state.getCompound("cursor");
+        int nextSegment = Math.max(1, cursorTag.getInt("next_segment"));
+        int lastStation = cursorTag.contains("last_station_segment")
+                ? Math.max(1, cursorTag.getInt("last_station_segment"))
+                : 1;
+        int lastCity = Math.max(0, cursorTag.getInt("last_city_bypass_segment"));
+        List<Integer> bridges = new ArrayList<>();
+        for (Tag entry : cursorTag.getList("recent_bridges", Tag.TAG_INT)) {
+            int bridge = ((IntTag) entry).getAsInt();
+            if (bridge >= 1 && bridge < nextSegment) {
+                bridges.add(bridge);
+            }
+        }
+        data.routePlanCursor = new RouteSegmentPlanner.Cursor(nextSegment, lastStation, lastCity, bridges);
+        ListTag plans = state.getList("pending_plans", Tag.TAG_COMPOUND);
+        for (int index = 0; index < plans.size() && data.routePlans.size() < MAX_ROUTE_PLANS_ON_LOAD; index++) {
+            RouteSegmentPlan plan = RouteSegmentPlan.load(plans.getCompound(index));
+            if (plan != null) {
+                data.routePlans.add(plan);
+            }
+        }
+    }
+
+    private void saveRoutePlanState(CompoundTag tag) {
+        CompoundTag state = new CompoundTag();
+        state.putLong("config_salt_lo", routePlanConfigSaltLo);
+        state.putLong("config_salt_hi", routePlanConfigSaltHi);
+        CompoundTag cursorTag = new CompoundTag();
+        cursorTag.putInt("next_segment", routePlanCursor.nextSegment());
+        cursorTag.putInt("last_station_segment", routePlanCursor.lastStationSegment());
+        cursorTag.putInt("last_city_bypass_segment", routePlanCursor.lastCityBypassSegment());
+        ListTag bridges = new ListTag();
+        routePlanCursor.recentBridges().forEach(bridge -> bridges.add(IntTag.valueOf(bridge)));
+        cursorTag.put("recent_bridges", bridges);
+        state.put("cursor", cursorTag);
+        ListTag plans = new ListTag();
+        routePlans.forEach(plan -> plans.add(plan.save()));
+        state.put("pending_plans", plans);
+        tag.put("route_plan_state", state);
     }
 
     private static CompoundTag saveVote(TeamPermissionPolicy.Vote vote) {
@@ -912,10 +1180,10 @@ public final class CampaignSavedData extends SavedData {
     public boolean createMission(MissionType type, int teamSize) {
         if (type == null
                 || !FinalePolicy.allowsOrdinaryMission(mode, status, day)
-                || (CampaignPacingPolicy.isMainlineMission(type)
+                || (type.blocksRoute()
                         && !FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day))
                 || activeMission != null
-                || type.category() != MissionType.Category.MAIN
+                || !type.occupiesMainlineSlot()
                 || !MissionPoolPolicy.mayCreateMainline(missionHistory, type)) {
             return false;
         }
@@ -1149,7 +1417,7 @@ public final class CampaignSavedData extends SavedData {
         target.transitionTo(MissionStage.SKIPPED);
         optionalMissions.remove(target);
         recordMissionOutcome(target.type(), MissionPoolPolicy.Outcome.SKIPPED);
-        queueOptionalCleanup(target);
+        queueMissionCleanup(target);
         setDirty();
         return OptionalSkipResult.SKIPPED;
     }
@@ -1249,7 +1517,7 @@ public final class CampaignSavedData extends SavedData {
             mission.transitionTo(MissionStage.COMPLETED);
             optionalMissions.remove(mission);
             recordMissionOutcome(mission.type(), MissionPoolPolicy.Outcome.COMPLETED);
-            queueOptionalCleanup(mission);
+            queueMissionCleanup(mission);
         }
         setDirty();
         return true;
@@ -1342,7 +1610,7 @@ public final class CampaignSavedData extends SavedData {
         mission.transitionTo(MissionStage.FAILED);
         optionalMissions.remove(mission);
         recordMissionOutcome(mission.type(), MissionPoolPolicy.Outcome.FAILED);
-        queueOptionalCleanup(mission);
+        queueMissionCleanup(mission);
     }
 
     public List<PendingSiteCleanup> pendingSiteCleanups() {
@@ -1358,17 +1626,20 @@ public final class CampaignSavedData extends SavedData {
     }
 
     /**
-     * Queues the site of a terminal optional mission for idempotent world
-     * cleanup. The queue is bounded; the oldest entry is dropped first when a
-     * corrupt save floods it, but normal operation never reaches the cap.
+     * Queues the site of a settled mission whose record is being dropped for
+     * idempotent world cleanup, so clearing a slot never strands world
+     * residue behind. Used by the optional settlement paths and by the day-100
+     * finale clearing. The queue is bounded; the oldest entry is dropped
+     * first when a corrupt save floods it, but normal operation never reaches
+     * the cap.
      */
-    private void queueOptionalCleanup(ActiveMission mission) {
+    private void queueMissionCleanup(ActiveMission mission) {
         if (mission.site() == null) {
             return;
         }
         if (pendingSiteCleanups.size() >= MAX_PENDING_CLEANUPS) {
             LastTrain.LOGGER.warn(
-                    "Optional cleanup queue reached its cap of {}; dropping the oldest entry",
+                    "Site cleanup queue reached its cap of {}; dropping the oldest entry",
                     MAX_PENDING_CLEANUPS);
             pendingSiteCleanups.remove(0);
         }
@@ -1904,7 +2175,7 @@ public final class CampaignSavedData extends SavedData {
                 day,
                 routeSegment);
         if (!FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day)
-                && CampaignPacingPolicy.isMainlineMission(type)) {
+                && type.blocksRoute()) {
             // The last-ten-day window can still offer supplies, but never
             // spends its only active slot on a fresh ordinary roadblock.
             type = MissionType.SUPPLY_RECOVERY;
@@ -1929,9 +2200,13 @@ public final class CampaignSavedData extends SavedData {
         if (day >= FINAL_DAY
                 && activeMission != null
                 && !isFinaleMission(activeMission)
-                && !CampaignPacingPolicy.isMainlineMission(activeMission.type())) {
-            // Optional proposals/content are not allowed to consume the
-            // final task slot once the finale day opens.
+                && !activeMission.type().blocksRoute()) {
+            // Non-blocking content (support supplies, stray optional work) is
+            // not allowed to consume the final task slot once the finale day
+            // opens. Clearing the slot must not strand its world site: any
+            // assigned site is registered for deferred cleanup before the
+            // mission record is dropped.
+            queueMissionCleanup(activeMission);
             activeMission = null;
             activeKeyMission = null;
             setDirty();
@@ -2034,6 +2309,14 @@ public final class CampaignSavedData extends SavedData {
 
     public UUID campaignId() {
         return campaignId;
+    }
+
+    /**
+     * The campaign's persistent planning seed: the mixed world seed, stored
+     * in the save and used by the route planner and mission draws.
+     */
+    public long campaignSeed() {
+        return campaignSeed;
     }
 
     public CampaignStatus status() {

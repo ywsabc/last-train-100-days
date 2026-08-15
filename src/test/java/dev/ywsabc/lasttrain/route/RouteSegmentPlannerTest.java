@@ -15,15 +15,15 @@ class RouteSegmentPlannerTest {
     private static final int SAMPLE_SEGMENTS = 256;
     private static final int MIX_SCAN_SEGMENTS = 2048;
     private static final int TEMPLATE_SCAN_SEGMENTS = 4096;
-    /** 'S' station / 'T' straight for segments 2..64 of the coin-flip config. */
+    /** 'S' station / 'T' straight for segments 2..64 of the coin-flip config under rules version 2. */
     private static final String COINFLIP_GOLDEN_TEMPLATES =
-            "TTTTSSTTTSSSSTSSSTTSTSTSSSSSTTTTSTSTTTSSTSTSTSTSTTTTSTTSSTSTSSS";
-    /** (segment, anchorOffset) of the first 32 POIs of the default config. */
+            "TTTTSTSTTSSSTSTTTTTSSSSSTSTSTTTTTSTSTTTSSTSTSTTTSTTSSSSSSTTTSSS";
+    /** (segment, anchorOffset) of the first 32 POIs of the default config under rules version 2. */
     private static final int[][] GOLDEN_POI_ANCHORS = {
-        {3, 20}, {6, 35}, {10, 35}, {13, 26}, {14, 29}, {19, 21}, {23, 25}, {24, 25},
-        {25, 23}, {27, 47}, {33, 24}, {41, 31}, {42, 16}, {43, 20}, {45, 34}, {46, 26},
-        {50, 35}, {51, 19}, {54, 38}, {56, 18}, {59, 46}, {63, 20}, {66, 30}, {68, 30},
-        {69, 23}, {71, 30}, {74, 22}, {76, 39}, {81, 39}, {86, 25}, {87, 35}, {90, 38},
+        {2, 41}, {5, 31}, {6, 23}, {8, 40}, {10, 40}, {11, 26}, {14, 41}, {16, 17},
+        {17, 32}, {20, 37}, {23, 16}, {27, 48}, {30, 33}, {33, 21}, {34, 31}, {39, 32},
+        {41, 41}, {43, 26}, {45, 26}, {50, 46}, {51, 43}, {55, 18}, {58, 45}, {61, 32},
+        {63, 32}, {64, 18}, {65, 47}, {70, 48}, {71, 17}, {75, 25}, {78, 43}, {80, 41},
     };
 
     @Test
@@ -208,17 +208,17 @@ class RouteSegmentPlannerTest {
         // JDK 21: the literals pin java.util.Random's bounded nextLong
         // behavior, so a future JDK that changes bounded-draw internals
         // fails these assertions instead of silently re-rolling committed
-        // routes. SplittableRandom offers no such stability promise, which
-        // is why the planner draws from java.util.Random.
+        // routes. SplittableRandom (rules version 1) offers no such stability
+        // promise, which is why version 2 draws from java.util.Random.
         assertEquals(1L, new Random(CAMPAIGN_SEED).nextLong(0, 2));
         // With exactly two candidate weights the template selection reduces
         // to one draw: STATION iff the first roll is 0. The golden string
         // records the resulting templates of segments 2..64 ('S' station,
-        // 'T' straight); a mismatch means either the seed derivation or the
-        // JDK draw changed.
+        // 'T' straight) under rules version 2; a mismatch means either the
+        // seed derivation or the JDK draw changed.
         RouteTemplateConfig coinFlip =
                 RouteTemplateConfig.DEFAULT.withWeights(1, 1, 0, 0).withStationMinGap(0);
-        RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, coinFlip);
+        RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 2, coinFlip);
         StringBuilder actual = new StringBuilder(COINFLIP_GOLDEN_TEMPLATES.length());
         for (int segment = 2; segment <= 64; segment++) {
             actual.append(
@@ -236,7 +236,7 @@ class RouteSegmentPlannerTest {
         // routes.
         assertEquals(16, new Random(CAMPAIGN_SEED).nextInt(16, 49));
         RouteTemplateConfig config = RouteTemplateConfig.DEFAULT;
-        RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, config);
+        RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 2, config);
         int checked = 0;
         for (int segment = 1;
                 segment <= MIX_SCAN_SEGMENTS && checked < GOLDEN_POI_ANCHORS.length;
@@ -271,34 +271,39 @@ class RouteSegmentPlannerTest {
 
     @Test
     void segmentSeedReactsToEachInput() {
+        // Rules version 2 mixes the config digest; version 1 ignores the
+        // config (covered by RouteSegmentPlannerVersionOneTest).
         RouteTemplateConfig config = RouteTemplateConfig.DEFAULT;
-        long seed = RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 7);
+        long seed = RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, config, 7);
         assertNotEquals(0L, seed);
-        assertEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 7));
-        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, config, 7));
-        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 1, 1, config, 7));
+        assertEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, config, 7));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 7));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 1, 2, config, 7));
         assertNotEquals(
                 seed,
-                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED + 1, 0, 1, config, 7));
+                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED + 1, 0, 2, config, 7));
         assertNotEquals(
                 seed,
                 RouteSegmentPlanner.segmentSeed(
                         CAMPAIGN_SEED,
                         0,
-                        1,
+                        2,
                         RouteTemplateConfig.DEFAULT.withStationMinGap(3),
                         7));
-        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 8));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, config, 8));
     }
 
     @Test
     void sameRulesVersionDifferentConfigReRollsPlans() {
+        // Under rules version 2 the config digest is part of every segment
+        // seed, so a config swap re-rolls future segments instead of
+        // silently keeping the old route.
         RouteSegmentPlanner baseline =
-                new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, RouteTemplateConfig.DEFAULT);
+                new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 2, RouteTemplateConfig.DEFAULT);
         RouteSegmentPlanner otherConfig = new RouteSegmentPlanner(
                 CAMPAIGN_SEED,
                 0,
-                1,
+                2,
                 RouteTemplateConfig.DEFAULT.withStationMinGap(3));
         assertTrue(anyTemplateDiffers(baseline, otherConfig, SAMPLE_SEGMENTS));
     }

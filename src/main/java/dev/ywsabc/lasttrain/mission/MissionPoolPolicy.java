@@ -25,7 +25,11 @@ public final class MissionPoolPolicy {
     public static final int FAILURE_STREAK_THRESHOLD = 2;
     public static final int MAX_GRACE_DAYS_FOR_SHORT_MISSION = 4;
 
-    /** Mainline types in the historical selection order. */
+    /**
+     * Mission types the director may draw for the single mission slot, in the
+     * historical selection order. Supply recovery is a support mission: it
+     * occupies the slot but never blocks the route.
+     */
     public static final List<MissionType> MAINLINE_TYPES = List.of(
             MissionType.RAIL_BREAK,
             MissionType.STATION_POWER,
@@ -56,7 +60,7 @@ public final class MissionPoolPolicy {
 
     public static Entry entry(MissionType type, Outcome outcome) {
         Objects.requireNonNull(type, "type");
-        return new Entry(type, type.category() == MissionType.Category.MAIN, outcome);
+        return new Entry(type, type.occupiesMainlineSlot(), outcome);
     }
 
     /** Truncates a loaded history to its newest {@link #HISTORY_LIMIT} entries. */
@@ -91,11 +95,13 @@ public final class MissionPoolPolicy {
 
     /**
      * Hard consecutive-type constraint, including pressure zombie blockades:
-     * a second blockade may only start after some other mainline mission ran.
+     * a second mission of the same slot-occupying type may only start after
+     * some other slot-occupying mission ran in between. Support missions such
+     * as supply recovery occupy the slot and obey the same constraint.
      */
     public static boolean mayCreateMainline(List<Entry> history, MissionType type) {
         Objects.requireNonNull(type, "type");
-        if (type.category() != MissionType.Category.MAIN) {
+        if (!type.occupiesMainlineSlot()) {
             return false;
         }
         return lastMainlineType(history).map(last -> last != type).orElse(true);

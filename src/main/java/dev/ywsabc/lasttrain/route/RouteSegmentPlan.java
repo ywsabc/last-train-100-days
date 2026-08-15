@@ -1,7 +1,11 @@
 package dev.ywsabc.lasttrain.route;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 
 /**
  * The committed plan of one route segment: template, interest points and
@@ -10,6 +14,10 @@ import java.util.Objects;
  * <p>Invariant: every plan carries exactly one {@link RouteExitKind#MAIN_LINE}
  * exit, so a side branch can never replace the way forward. Construction
  * rejects plans that break the invariant.</p>
+ *
+ * <p>Plans for pending (planned but not yet realized) segments are persisted
+ * in the campaign save so committed plans are adopted as-is on reload and
+ * never silently re-rolled.</p>
  */
 public record RouteSegmentPlan(
         int segmentIndex,
@@ -43,5 +51,93 @@ public record RouteSegmentPlan(
             }
         }
         throw new IllegalStateException("Segment " + segmentIndex + " lost its main-line exit");
+    }
+
+    /** Serializes this plan into a new NBT compound. */
+    public CompoundTag save() {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("segment", segmentIndex);
+        tag.putLong("seed", segmentSeed);
+        tag.putString("template", template.name());
+        ListTag poisTag = new ListTag();
+        for (RoutePoi poi : pois) {
+            CompoundTag poiTag = new CompoundTag();
+            poiTag.putString("type", poi.type().name());
+            poiTag.putInt("anchor", poi.anchorOffset());
+            poisTag.add(poiTag);
+        }
+        tag.put("pois", poisTag);
+        ListTag exitsTag = new ListTag();
+        for (RouteExit exit : exits) {
+            CompoundTag exitTag = new CompoundTag();
+            exitTag.putString("kind", exit.kind().name());
+            exitTag.putInt("anchor", exit.anchorOffset());
+            exitsTag.add(exitTag);
+        }
+        tag.put("exits", exitsTag);
+        return tag;
+    }
+
+    /**
+     * Parses a persisted plan, or null when the entry is malformed. Malformed
+     * entries are dropped exactly like other corrupt save records: a faulty
+     * save can never stop loading, and the planner re-derives the missing
+     * segment deterministically.
+     */
+    public static RouteSegmentPlan load(CompoundTag tag) {
+        if (tag == null
+                || !tag.contains("segment", Tag.TAG_INT)
+                || !tag.contains("seed", Tag.TAG_LONG)
+                || !tag.contains("template", Tag.TAG_STRING)) {
+            return null;
+        }
+        int segment = tag.getInt("segment");
+        long seed = tag.getLong("seed");
+        SegmentTemplate template = enumByName(SegmentTemplate.class, tag.getString("template"));
+        if (template == null) {
+            return null;
+        }
+        List<RoutePoi> pois = new ArrayList<>();
+        for (Tag entry : tag.getList("pois", Tag.TAG_COMPOUND)) {
+            CompoundTag poiTag = (CompoundTag) entry;
+            RoutePoiType type = enumByName(RoutePoiType.class, poiTag.getString("type"));
+            if (type == null) {
+                return null;
+            }
+            try {
+                pois.add(new RoutePoi(type, poiTag.getInt("anchor")));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        List<RouteExit> exits = new ArrayList<>();
+        for (Tag entry : tag.getList("exits", Tag.TAG_COMPOUND)) {
+            CompoundTag exitTag = (CompoundTag) entry;
+            RouteExitKind kind = enumByName(RouteExitKind.class, exitTag.getString("kind"));
+            if (kind == null) {
+                return null;
+            }
+            try {
+                exits.add(new RouteExit(kind, exitTag.getInt("anchor")));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        try {
+            return new RouteSegmentPlan(segment, seed, template, pois, exits);
+        } catch (IllegalArgumentException | NullPointerException ignored) {
+            return null;
+        }
+    }
+
+    private static <E extends Enum<E>> E enumByName(Class<E> type, String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        try {
+            return Enum.valueOf(type, name);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 }

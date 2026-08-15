@@ -16,9 +16,12 @@ public final class FinalePolicy {
      * list, reward receipts, pending site cleanups, mission history and team
      * membership). Schema 8 adds captain hand-off timestamps and the durable
      * in-session vote record. Schema 9 adds the persistent campaign mode; old
-     * saves use STORY_100_DAYS when the mode key is absent.
+     * saves use STORY_100_DAYS when the mode key is absent. Schema 10 adds the
+     * durable route plan state (route rules version, config salt, planner
+     * cursor and pending segment plans); saves without the key keep the
+     * historical route rules version 1 until an explicit migration.
      */
-    public static final int CURRENT_SCHEMA = 9;
+    public static final int CURRENT_SCHEMA = 10;
     public static final int FINAL_DAY = 100;
     public static final int FINALE_HUB_START_DAY = 90;
     public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;

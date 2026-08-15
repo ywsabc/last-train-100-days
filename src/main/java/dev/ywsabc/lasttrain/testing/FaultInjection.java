@@ -10,8 +10,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Every switch defaults to off, and the production logical server never
  * registers one, so the shipped code runs the no-op path: with no active
  * injection {@link #shouldFail(FailurePoint)} is a single volatile reference
- * read with no allocation and no locking. Tests (and future operator tooling)
- * register a failure for exactly {@code failCount} occurrences or until
+ * read with no allocation and no locking — an extremely low fixed cost, not
+ * zero overhead. Registering a failure point is a development-only entry:
+ * outside a development environment (no explicit
+ * {@code -Dlasttrain.devTools=true} startup parameter) {@link #register} and
+ * {@link #registerAlways} throw instead of touching live campaign behavior.
+ * Tests (and future operator tooling) register a failure for exactly
+ * {@code failCount} occurrences or until
  * {@link #unregister(FailurePoint)}/always; each injected failure is consumed
  * by a CAS counter, so concurrent readers can never double-consume or skip
  * one occurrence. Mutations are synchronized and published through a
@@ -60,9 +65,12 @@ public final class FaultInjection {
     /**
      * Arms {@code point} to fail for the next {@code failCount} occurrences.
      *
-     * <p>Registering a point again replaces its remaining budget.</p>
+     * <p>Registering a point again replaces its remaining budget. This is a
+     * development-only entry point: without an explicit development
+     * environment it throws and leaves every switch untouched.</p>
      */
     public static void register(FailurePoint point, int failCount) {
+        DevToolsGate.requireEnabled("FaultInjection.register");
         Objects.requireNonNull(point, "point");
         if (failCount < 1) {
             throw new IllegalArgumentException("failCount must be >= 1: " + failCount);

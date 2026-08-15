@@ -51,6 +51,18 @@ class FastForwardModeTest {
     }
 
     @Test
+    void enableRefusesOutsideADevelopmentEnvironment() {
+        CampaignSavedData data = new CampaignSavedData();
+        System.clearProperty(dev.ywsabc.lasttrain.testing.DevToolsGate.SYSTEM_PROPERTY);
+        try {
+            assertThrows(IllegalStateException.class, () -> FastForwardMode.enable(data, 60));
+            assertFalse(FastForwardMode.isEnabled(data));
+        } finally {
+            System.setProperty(dev.ywsabc.lasttrain.testing.DevToolsGate.SYSTEM_PROPERTY, "true");
+        }
+    }
+
+    @Test
     void enableValidatesTheDayLengthAndOptsInExplicitly() {
         CampaignSavedData data = new CampaignSavedData();
         assertThrows(IllegalArgumentException.class, () -> FastForwardMode.enable(data, 0));

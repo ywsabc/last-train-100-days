@@ -23,9 +23,14 @@ import net.neoforged.fml.ModList;
  * corridor in front of the party.
  *
  * <p>The director prepares at most one 64-block segment per second and keeps
- * only two segments ahead. TongDa's track spawner owns physical track
- * placement; persistent route progress advances only after all 64 Create
- * tracks are observed with the expected shape.</p>
+ * only two segments ahead. Every segment is realized from its committed
+ * {@link RouteSegmentPlan} (planned and persisted by
+ * {@link RouteSegmentPlanner} in the plan → realize two-phase model): the
+ * template drives the deck support density, station platforms sit on their
+ * planned POI anchors, and city bypasses carry a branch spur at their
+ * planned branch exit. TongDa's track spawner owns physical track placement;
+ * persistent route progress advances only after all 64 Create tracks are
+ * observed with the expected shape.</p>
  */
 public final class RouteDirector {
     private static final int UPDATE_ALL = 3;
@@ -113,6 +118,7 @@ public final class RouteDirector {
         int nextSegment = data.generatedRouteSegment() + 1;
         if (nextSegment <= desiredSegment && generateSegment(level, data, trackBlock, nextSegment)) {
             data.markRouteSegmentGenerated(nextSegment);
+            data.dropRoutePlanThrough(nextSegment);
             lastReportedTongDaSegment = -1;
             lastReportedTongDaStatus = null;
             LastTrain.LOGGER.info(
@@ -180,6 +186,19 @@ public final class RouteDirector {
         return !FaultInjection.shouldFail(FaultInjection.FailurePoint.ROUTE_SEGMENT_GENERATION);
     }
 
+    /**
+     * The planned realization layout of one segment, ready for the world
+     * bound generator. Plans the segment forward (and persists the extension)
+     * when the committed plan list does not reach it yet, so the director
+     * never falls back to fixed constants.
+     */
+    static RouteSegmentLayout layoutFor(CampaignSavedData data, int segment) {
+        return RouteSegmentLayout.compute(
+                data.starterStationAnchor(),
+                segment,
+                data.routePlan(segment));
+    }
+
     private static boolean generateSegment(
             ServerLevel level,
             CampaignSavedData data,
@@ -191,10 +210,8 @@ public final class RouteDirector {
                     segment);
             return false;
         }
-        BlockPos station = data.starterStationAnchor();
-        int startOffset = RouteGeometry.segmentStartOffset(segment);
-        int endOffset = RouteGeometry.segmentEndOffset(segment);
-        BlockPos borderProbe = station.offset(endOffset, 1, 0);
+        RouteSegmentLayout layout = layoutFor(data, segment);
+        BlockPos borderProbe = layout.borderProbe();
         if (!level.getWorldBorder().isWithinBounds(borderProbe)) {
             LastTrain.LOGGER.warn(
                     "Route segment {} reaches the world border at {}; generation is paused",
@@ -203,6 +220,9 @@ public final class RouteDirector {
             return false;
         }
 
+        BlockPos station = data.starterStationAnchor();
+        int startOffset = RouteGeometry.segmentStartOffset(segment);
+        int endOffset = RouteGeometry.segmentEndOffset(segment);
         for (int offset = startOffset; offset <= endOffset; offset++) {
             BlockPos deckCenter = station.offset(offset, 0, 0);
             clearVehicleEnvelope(level, deckCenter, trackBlock);
@@ -212,25 +232,26 @@ public final class RouteDirector {
                         Blocks.POLISHED_ANDESITE.defaultBlockState(),
                         UPDATE_ALL);
             }
-            if ((offset - startOffset) % 8 == 0) {
-                placeSupport(level, deckCenter.offset(0, -1, -1));
-                placeSupport(level, deckCenter.offset(0, -1, 1));
-            }
+        }
+        for (BlockPos support : layout.deckSupportTops()) {
+            placeSupport(level, support);
         }
 
-        BlockPos trackStart = station.offset(startOffset, 1, 0);
         TongDaTrackBridge.SegmentInspection inspection =
-                TongDaTrackBridge.inspectEastboundSegment(level, trackStart);
+                TongDaTrackBridge.inspectEastboundSegment(level, layout.trackStart());
         if (!inspection.actuallyComplete()) {
             prepareTongDaControlPosition(level, inspection.spawnerPosition());
             TongDaTrackBridge.SubmissionResult submission =
-                    TongDaTrackBridge.submitEastboundSegment(level, trackStart);
+                    TongDaTrackBridge.submitEastboundSegment(level, layout.trackStart());
             reportTongDaStatus(segment, submission);
             return false;
         }
 
-        if (segment % 4 == 0) {
-            buildWaypointPlatform(level, station, endOffset - 18, endOffset);
+        if (layout.hasPlatform()) {
+            buildPlatform(level, layout.platformAnchor(), layout.platformHalfLength());
+        }
+        if (layout.hasBranchSpur()) {
+            buildBranchSpur(level, layout.branchSpurAnchor());
         }
         return true;
     }
@@ -302,30 +323,50 @@ public final class RouteDirector {
         }
     }
 
-    private static void buildWaypointPlatform(
+    private static void buildPlatform(
             ServerLevel level,
-            BlockPos station,
-            int startOffset,
-            int endOffset) {
-        for (int offset = startOffset; offset <= endOffset; offset++) {
+            BlockPos anchor,
+            int halfLength) {
+        for (int offset = -halfLength; offset <= halfLength; offset++) {
             for (int z = -4; z <= 4; z++) {
                 if (z == 0) {
                     continue;
                 }
                 level.setBlock(
-                        station.offset(offset, 0, z),
+                        anchor.offset(offset, 0, z),
                         Blocks.STONE_BRICKS.defaultBlockState(),
                         UPDATE_ALL);
             }
         }
-        for (int offset : new int[]{startOffset + 2, endOffset - 2}) {
+        for (int offset : new int[]{-halfLength + 2, halfLength - 2}) {
             for (int z : new int[]{-3, 3}) {
                 level.setBlock(
-                        station.offset(offset, 1, z),
+                        anchor.offset(offset, 1, z),
                         Blocks.LANTERN.defaultBlockState(),
                         UPDATE_ALL);
             }
         }
+    }
+
+    /**
+     * Places the city branch spur: a short stone apron diverging to the
+     * positive-Z side at the planned branch exit. It is a marker structure,
+     * never a second way forward on the main line; the main-line track
+     * remains the TongDa eastbound corridor.
+     */
+    private static void buildBranchSpur(ServerLevel level, BlockPos anchor) {
+        for (int x = 0; x <= 2; x++) {
+            for (int z = 1; z <= 5; z++) {
+                level.setBlock(
+                        anchor.offset(x, 0, z),
+                        Blocks.STONE_BRICKS.defaultBlockState(),
+                        UPDATE_ALL);
+            }
+        }
+        level.setBlock(
+                anchor.offset(0, 1, 5),
+                Blocks.LANTERN.defaultBlockState(),
+                UPDATE_ALL);
     }
 
     private static Block registeredBlock(String id) {

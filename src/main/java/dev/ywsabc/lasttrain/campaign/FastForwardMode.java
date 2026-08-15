@@ -1,5 +1,6 @@
 package dev.ywsabc.lasttrain.campaign;
 
+import dev.ywsabc.lasttrain.testing.DevToolsGate;
 import java.util.Objects;
 
 /**
@@ -13,6 +14,10 @@ import java.util.Objects;
  * <li>it defaults to disabled, keeps the production 20-minute day, and every
  * accelerated entry throws {@link IllegalStateException} until
  * {@link #enable(CampaignSavedData, int)} has been called;</li>
+ * <li>{@link #enable} additionally requires an explicit development
+ * environment ({@code -Dlasttrain.devTools=true} startup parameter) and
+ * refuses outside one, so a production launch can never trip the accelerated
+ * clock;</li>
  * <li>the day length is memory-only and is never persisted, so a reload
  * always returns to the production day length;</li>
  * <li>the production server tick loop never calls any entry of this class —
@@ -33,9 +38,11 @@ public final class FastForwardMode {
     /**
      * Explicitly opts {@code data} into the accelerated clock with the given
      * day length. {@code 24_000} restores the standard day while keeping the
-     * batch entries available.
+     * batch entries available. Requires a development environment: outside
+     * one this entry throws before touching the campaign.
      */
     public static void enable(CampaignSavedData data, int ticksPerDay) {
+        DevToolsGate.requireEnabled("FastForwardMode.enable");
         Objects.requireNonNull(data, "data").enableFastForward(ticksPerDay);
     }
 
