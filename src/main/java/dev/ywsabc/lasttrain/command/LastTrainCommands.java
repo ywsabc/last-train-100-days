@@ -69,7 +69,13 @@ public final class LastTrainCommands {
                                 .executes(LastTrainCommands::failMission))
                         .then(Commands.literal("clear")
                                 .requires(source -> source.hasPermission(2))
-                                .executes(LastTrainCommands::clearMission))));
+                                .executes(LastTrainCommands::clearMission)))
+                .then(Commands.literal("recover")
+                        .then(Commands.literal("status")
+                                .executes(LastTrainCommands::recoverStatus))
+                        .then(Commands.literal("train")
+                                .requires(source -> source.hasPermission(2))
+                                .executes(LastTrainCommands::recoverTrain))));
     }
 
     private static int status(CommandContext<CommandSourceStack> context) {
@@ -250,6 +256,39 @@ public final class LastTrainCommands {
                 () -> Component.translatable("command.lasttrain.mission.cleared"),
                 true);
         return 1;
+    }
+
+    private static int recoverStatus(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.recover.status",
+                        data.trainMissingTicks(),
+                        data.trainImmobileTicks(),
+                        data.rescueCount(),
+                        data.lastRescueDay(),
+                        data.rescueAnchorSegment()),
+                false);
+        return 1;
+    }
+
+    private static int recoverTrain(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        if (!data.applyTrainRescue()) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.recover.refused"));
+            return 0;
+        }
+        IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.recover.applied",
+                        data.rescueCount(),
+                        data.rescueAnchorSegment(),
+                        data.attention(),
+                        data.threat()),
+                true);
+        return data.rescueCount();
     }
 
     private static CampaignSavedData data(CommandContext<CommandSourceStack> context) {

@@ -376,7 +376,8 @@ public final class SimurailTrainBootstrap {
         }
     }
 
-    private static boolean hasVehicleStack() {
+    /** True while the full pinned vehicle stack (Create, Sable, Simulated, Simurail) is loaded. */
+    public static boolean hasVehicleStack() {
         ModList mods = ModList.get();
         return mods.isLoaded("create")
                 && mods.isLoaded("sable")

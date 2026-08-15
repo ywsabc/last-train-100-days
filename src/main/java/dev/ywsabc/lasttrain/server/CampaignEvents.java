@@ -6,13 +6,19 @@ import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.route.RouteDirector;
+import java.util.Optional;
 import java.util.UUID;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 public final class CampaignEvents {
+    private static Vec3 lastTrainPosition;
+    private static int lastTrainPositionTick;
+    private static TrainRecoveryPolicy.Directive lastTrainDirective;
+
     private CampaignEvents() {
     }
 
@@ -41,6 +47,7 @@ public final class CampaignEvents {
         int activePlayers = (int) server.getPlayerList().getPlayers().stream()
                 .filter(player -> !player.isSpectator())
                 .count();
+        observeTrainRecovery(server, data, activePlayers);
         if (activePlayers == 0) {
             return;
         }
@@ -84,6 +91,54 @@ public final class CampaignEvents {
                     broadcast(server, Component.translatable("message.lasttrain.campaign_completed"));
             case NONE -> {
             }
+        }
+    }
+
+    /**
+     * Feeds world-side train facts into the recovery policy every tick. The
+     * position cache lives here because it is a per-session observation, not
+     * campaign state; safe-mode transitions inside the saved data still apply
+     * while nobody is online.
+     */
+    private static void observeTrainRecovery(
+            MinecraftServer server,
+            CampaignSavedData data,
+            int activePlayers) {
+        UUID trainId = data.starterTrainSublevelId();
+        boolean referenceKnown = trainId != null;
+        Optional<Vec3> located = trainId == null
+                ? Optional.empty()
+                : SableTrainTracker.position(server.overworld(), trainId);
+
+        boolean moving = false;
+        boolean playerInDanger = false;
+        if (located.isPresent()) {
+            Vec3 position = located.orElseThrow();
+            int currentTick = server.getTickCount();
+            moving = lastTrainPosition != null
+                    && currentTick - lastTrainPositionTick == 1
+                    && TrainRecoveryPolicy.isMoving(
+                            position.distanceToSqr(lastTrainPosition));
+            lastTrainPosition = position;
+            lastTrainPositionTick = currentTick;
+            playerInDanger = server.getPlayerList().getPlayers().stream()
+                    .anyMatch(player -> !player.isSpectator()
+                            && TrainRecoveryPolicy.playerInDanger(
+                                    player.distanceToSqr(position)));
+        } else {
+            lastTrainPosition = null;
+        }
+
+        TrainRecoveryPolicy.Directive directive = data.observeTrain(
+                SimurailTrainBootstrap.hasVehicleStack(),
+                referenceKnown,
+                located.isPresent(),
+                moving,
+                playerInDanger,
+                activePlayers);
+        if (directive != lastTrainDirective) {
+            lastTrainDirective = directive;
+            LastTrain.LOGGER.info("Train recovery assessment: {}", directive);
         }
     }
 

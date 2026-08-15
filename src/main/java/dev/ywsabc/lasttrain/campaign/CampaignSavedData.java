@@ -4,6 +4,7 @@ import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
+import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.SplittableRandom;
@@ -54,6 +55,10 @@ public final class CampaignSavedData extends SavedData {
     private boolean starterTrainAssembled;
     private UUID starterTrainSublevelId;
     private int starterTrainAssemblyAttempts;
+    private int rescueCount;
+    private int lastRescueDay;
+    private int trainMissingTicks;
+    private int trainImmobileTicks;
     private int effectivePlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int pendingPlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int scalingHoldTicks;
@@ -114,6 +119,19 @@ public final class CampaignSavedData extends SavedData {
             }
         }
         data.starterTrainAssemblyAttempts = Math.max(0, tag.getInt("starter_train_assembly_attempts"));
+        data.rescueCount = Math.clamp(
+                tag.getInt("rescue_count"),
+                0,
+                TrainRecoveryPolicy.RESCUE_COUNT_LIMIT);
+        data.lastRescueDay = Math.clamp(tag.getInt("last_rescue_day"), 0, FINAL_DAY);
+        data.trainMissingTicks = Math.clamp(
+                tag.getInt("train_missing_ticks"),
+                0,
+                TrainRecoveryPolicy.MAX_TRACKED_TICKS);
+        data.trainImmobileTicks = Math.clamp(
+                tag.getInt("train_immobile_ticks"),
+                0,
+                TrainRecoveryPolicy.MAX_TRACKED_TICKS);
         data.effectivePlayers = PopulationScalingPolicy.clampPlayers(
                 tag.getInt("scaling_effective_players"));
         data.pendingPlayers = PopulationScalingPolicy.clampPlayers(
@@ -172,6 +190,10 @@ public final class CampaignSavedData extends SavedData {
             tag.putString("starter_train_sublevel_id", starterTrainSublevelId.toString());
         }
         tag.putInt("starter_train_assembly_attempts", starterTrainAssemblyAttempts);
+        tag.putInt("rescue_count", rescueCount);
+        tag.putInt("last_rescue_day", lastRescueDay);
+        tag.putInt("train_missing_ticks", trainMissingTicks);
+        tag.putInt("train_immobile_ticks", trainImmobileTicks);
         tag.putInt("scaling_effective_players", effectivePlayers);
         tag.putInt("scaling_pending_players", pendingPlayers);
         tag.putInt("scaling_hold_ticks", scalingHoldTicks);
@@ -574,6 +596,108 @@ public final class CampaignSavedData extends SavedData {
         setDirty();
     }
 
+    /**
+     * Feeds the server-side observation of the physical train into the
+     * recovery policy.
+     *
+     * <p>Safe-mode transitions apply regardless of player count so a broken
+     * vehicle stack parks the campaign immediately. The missing and immobile
+     * confirmation timers only advance while at least one non-spectator
+     * player is online, and they persist across restarts so a crash cannot
+     * reset the grace period. The policy only decides; relocating the
+     * physical body is the vehicle backend's operation.</p>
+     */
+    public TrainRecoveryPolicy.Directive observeTrain(
+            boolean vehicleStackLoaded,
+            boolean trainReferenceKnown,
+            boolean trainLocatable,
+            boolean trainMoving,
+            boolean playerInDangerCollision,
+            int activePlayers) {
+        TrainRecoveryPolicy.TrainSituation situation = new TrainRecoveryPolicy.TrainSituation(
+                vehicleStackLoaded,
+                trainReferenceKnown,
+                trainLocatable,
+                trainMoving,
+                trainMissingTicks,
+                trainImmobileTicks,
+                playerInDangerCollision,
+                rescueCount,
+                lastRescueDay,
+                day,
+                status);
+        TrainRecoveryPolicy.Directive directive = TrainRecoveryPolicy.assess(situation);
+
+        if (directive == TrainRecoveryPolicy.Directive.SAFE_MODE
+                && status == CampaignStatus.RUNNING) {
+            status = CampaignStatus.SAFE_MODE;
+            setDirty();
+        } else if (directive != TrainRecoveryPolicy.Directive.SAFE_MODE
+                && status == CampaignStatus.SAFE_MODE) {
+            status = CampaignStatus.RUNNING;
+            setDirty();
+        }
+
+        if (activePlayers > 0
+                && (status == CampaignStatus.RUNNING
+                        || status == CampaignStatus.SAFE_MODE)) {
+            int nextMissingTicks = !trainLocatable && trainReferenceKnown
+                    ? Math.min(
+                            TrainRecoveryPolicy.MAX_TRACKED_TICKS,
+                            trainMissingTicks + 1)
+                    : 0;
+            int nextImmobileTicks = trainLocatable && !trainMoving
+                    ? Math.min(
+                            TrainRecoveryPolicy.MAX_TRACKED_TICKS,
+                            trainImmobileTicks + 1)
+                    : 0;
+            if (nextMissingTicks != trainMissingTicks
+                    || nextImmobileTicks != trainImmobileTicks) {
+                trainMissingTicks = nextMissingTicks;
+                trainImmobileTicks = nextImmobileTicks;
+                setDirty();
+            }
+        }
+        return directive;
+    }
+
+    /**
+     * Records one completed train rescue: increments the counter, starts the
+     * cooldown, applies the attention and threat costs and resets the
+     * detection timers. Refuses while the policy cooldown or count limit
+     * blocks another rescue.
+     */
+    public boolean applyTrainRescue() {
+        if (status != CampaignStatus.RUNNING
+                && status != CampaignStatus.SAFE_MODE) {
+            return false;
+        }
+        if (!TrainRecoveryPolicy.canRescue(rescueCount, lastRescueDay, day)) {
+            return false;
+        }
+        rescueCount++;
+        lastRescueDay = day;
+        trainMissingTicks = 0;
+        trainImmobileTicks = 0;
+        TrainRecoveryPolicy.RescueCosts costs =
+                TrainRecoveryPolicy.applyCosts(attention, threat);
+        attention = costs.attention();
+        threat = costs.threat();
+        setDirty();
+        return true;
+    }
+
+    /**
+     * The farthest verified segment a rescue may return the train to. An
+     * active mission's segment is a hard checkpoint: rescue is repair, not a
+     * way to skip the blocker.
+     */
+    public int rescueAnchorSegment() {
+        return TrainRecoveryPolicy.anchorSegment(
+                routeSegment,
+                activeMission == null ? null : activeMission.routeSegment());
+    }
+
     private boolean tryGenerateDailyMission() {
         if (!FinalePolicy.allowsOrdinaryMission(status, day)
                 || activeMission != null
@@ -751,6 +875,22 @@ public final class CampaignSavedData extends SavedData {
 
     public int starterTrainAssemblyAttempts() {
         return starterTrainAssemblyAttempts;
+    }
+
+    public int rescueCount() {
+        return rescueCount;
+    }
+
+    public int lastRescueDay() {
+        return lastRescueDay;
+    }
+
+    public int trainMissingTicks() {
+        return trainMissingTicks;
+    }
+
+    public int trainImmobileTicks() {
+        return trainImmobileTicks;
     }
 
     public enum TickOutcome {
