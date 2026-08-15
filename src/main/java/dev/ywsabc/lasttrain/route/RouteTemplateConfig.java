@@ -1,5 +1,8 @@
 package dev.ywsabc.lasttrain.route;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+
 /**
  * Appearance rules and slot bounds for deterministic route planning.
  *
@@ -9,7 +12,7 @@ package dev.ywsabc.lasttrain.route;
  * consecutive segments. POI anchors are drawn inside
  * {@code [poiAnchorMin, poiAnchorMax]}, relative to the segment entry.</p>
  *
- * <p>Every field participates in {@link #fingerprint()}, which
+ * <p>Every field participates in {@link #seedSalt()}, which
  * {@link RouteSegmentPlanner} mixes into segment seeds: swapping configs under
  * the same rules version re-rolls future segments instead of silently keeping
  * the old route. Changing the selection logic itself must still bump
@@ -31,9 +34,6 @@ public record RouteTemplateConfig(
 
     /** Hard ceiling for interest point slots per segment. */
     public static final int MAX_POI_SLOTS = 2;
-
-    private static final long FINGERPRINT_BASE = 0x9E3779B97F4A7C15L;
-    private static final long FINGERPRINT_FOLD = 0xBF58476D1CE4E5B9L;
 
     public static final RouteTemplateConfig DEFAULT = new RouteTemplateConfig(
             50, 20, 20, 10,
@@ -166,31 +166,68 @@ public record RouteTemplateConfig(
     }
 
     /**
-     * Stable content fingerprint of every planning input of this config.
-     *
-     * <p>All weights, minimum gaps, the bridge/tunnel budget and the POI
-     * anchor range are folded into one long. Each fold step is invertible, so
-     * two configs with any differing field can never share a fingerprint.</p>
-     *
-     * @return a deterministic long identifying this exact config content
+     * Low and high halves of a 256-bit config digest, in that order.
      */
-    public long fingerprint() {
-        long mixed = FINGERPRINT_BASE;
-        mixed = fold(mixed, straightWeight);
-        mixed = fold(mixed, stationWeight);
-        mixed = fold(mixed, cityBypassWeight);
-        mixed = fold(mixed, bridgeTunnelWeight);
-        mixed = fold(mixed, cityBypassMinGap);
-        mixed = fold(mixed, stationMinGap);
-        mixed = fold(mixed, bridgeTunnelMaxPerWindow);
-        mixed = fold(mixed, bridgeTunnelWindow);
-        mixed = fold(mixed, maxPoiSlots);
-        mixed = fold(mixed, poiAnchorMin);
-        mixed = fold(mixed, poiAnchorMax);
-        return mixed;
+    public record SeedSalt(long lo, long hi) {}
+
+    /**
+     * SHA-256 digest of this config's canonical field sequence, split into
+     * two longs for mixing into segment seeds.
+     *
+     * <p>The digest covers all eleven fields as big-endian ints in component
+     * order, so any field change feeds a different salt pair into the seed
+     * derivation (distinct sequences hash to distinct digests unless a SHA-256
+     * collision exists, which is not constructible in practice). The final
+     * 64-bit segment seed is only a further reduction of this digest.</p>
+     *
+     * <p>The legacy single-long XOR/multiply fingerprint was provably not
+     * collision-free: folding the 2^93+ config space into one long cannot be
+     * injective, so two configs could share a fingerprint and a config swap
+     * silently kept the old route. This method keeps the full field material
+     * in the derivation instead of pre-collapsing it.</p>
+     *
+     * @return the low and high halves of the SHA-256 digest of the field
+     *     sequence
+     */
+    public SeedSalt seedSalt() {
+        byte[] fields = new byte[11 * Integer.BYTES];
+        int offset = 0;
+        offset = putInt(fields, offset, straightWeight);
+        offset = putInt(fields, offset, stationWeight);
+        offset = putInt(fields, offset, cityBypassWeight);
+        offset = putInt(fields, offset, bridgeTunnelWeight);
+        offset = putInt(fields, offset, cityBypassMinGap);
+        offset = putInt(fields, offset, stationMinGap);
+        offset = putInt(fields, offset, bridgeTunnelMaxPerWindow);
+        offset = putInt(fields, offset, bridgeTunnelWindow);
+        offset = putInt(fields, offset, maxPoiSlots);
+        offset = putInt(fields, offset, poiAnchorMin);
+        putInt(fields, offset, poiAnchorMax);
+        byte[] digest = sha256(fields);
+        return new SeedSalt(readLong(digest, 0), readLong(digest, Long.BYTES));
     }
 
-    private static long fold(long mixed, int field) {
-        return (mixed ^ field) * FINGERPRINT_FOLD;
+    private static int putInt(byte[] out, int offset, int value) {
+        out[offset] = (byte) (value >>> 24);
+        out[offset + 1] = (byte) (value >>> 16);
+        out[offset + 2] = (byte) (value >>> 8);
+        out[offset + 3] = (byte) value;
+        return offset + Integer.BYTES;
+    }
+
+    private static long readLong(byte[] in, int offset) {
+        long value = 0;
+        for (int i = 0; i < Long.BYTES; i++) {
+            value = (value << 8) | (in[offset + i] & 0xFFL);
+        }
+        return value;
+    }
+
+    private static byte[] sha256(byte[] input) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(input);
+        } catch (NoSuchAlgorithmException e) {
+            throw new AssertionError("SHA-256 must exist on every JDK", e);
+        }
     }
 }

@@ -13,8 +13,9 @@ import java.util.Random;
  *
  * <p>Every segment derives its own seed so that one extra random draw can
  * never reshuffle later segments:
- * {@code segmentSeed = hash(campaignSeed, routeIndex, routeRulesVersion, configFingerprint, segmentIndex)},
- * and every interest point derives
+ * {@code segmentSeed = avalanche(mix(campaignSeed, routeIndex, routeRulesVersion, configSeedSalt.lo, configSeedSalt.hi, segmentIndex))},
+ * where the two config salt halves come from the SHA-256 digest of all eleven
+ * config fields, and every interest point derives
  * {@code poiSeed = hash(segmentSeed, slotIndex)}. Selection obeys the
  * configured appearance rules (station minimum gap, no consecutive city
  * bypasses, bridge/tunnel budget window) and falls back to a straight segment
@@ -33,14 +34,21 @@ import java.util.Random;
 public final class RouteSegmentPlanner {
     public static final int DEFAULT_ROUTE_INDEX = 0;
     /**
-     * Bump when the selection logic itself changes, so committed routes do not
-     * silently re-roll; config value changes are covered by the config fingerprint.
+     * Bump when the selection logic or seed derivation itself changes, so
+     * committed routes do not silently re-roll; config value changes are
+     * covered by the full config field digest in the seed. Version 1 used
+     * SplittableRandom without any config input in the seed (the historical
+     * first draft; the P2 review switched to java.util.Random plus a
+     * single-long fingerprint without bumping). Version 2 uses java.util.Random
+     * and mixes the SHA-256 digest of all config fields into every segment
+     * seed.
      */
-    public static final int DEFAULT_ROUTE_RULES_VERSION = 1;
+    public static final int DEFAULT_ROUTE_RULES_VERSION = 2;
     private static final long POI_DOMAIN_SALT = 0x504F495F534C4F54L; // "POI_SLOT"
     private static final long INDEX_CONSTANT_ROUTE = 0x9E3779B97F4A7C15L;
     private static final long INDEX_CONSTANT_RULES = 0xBF58476D1CE4E5B9L;
-    private static final long INDEX_CONSTANT_CONFIG = 0xE7037ED1A0B428DBL;
+    private static final long INDEX_CONSTANT_CONFIG_LO = 0xE7037ED1A0B428DBL;
+    private static final long INDEX_CONSTANT_CONFIG_HI = 0xD6E8FEB86659FD93L;
     private static final long INDEX_CONSTANT_SEGMENT = 0x94D049BB133111EBL;
     private static final long INDEX_CONSTANT_SLOT = 0xD1B54A32D192ED03L;
 
@@ -48,7 +56,6 @@ public final class RouteSegmentPlanner {
     private final int routeIndex;
     private final int routeRulesVersion;
     private final RouteTemplateConfig config;
-    private final long configFingerprint;
     private final Map<Integer, RouteSegmentPlan> plans = new HashMap<>();
     private final ArrayDeque<Integer> recentBridges = new ArrayDeque<>();
     private int lastPlannedSegment;
@@ -79,7 +86,6 @@ public final class RouteSegmentPlanner {
         this.routeIndex = routeIndex;
         this.routeRulesVersion = routeRulesVersion;
         this.config = Objects.requireNonNull(config, "config");
-        this.configFingerprint = this.config.fingerprint();
     }
 
     /**
@@ -107,16 +113,16 @@ public final class RouteSegmentPlanner {
      * @param campaignSeed the campaign's persistent seed
      * @param routeIndex which route of the campaign this belongs to
      * @param routeRulesVersion version of the planning rules the route committed
-     * @param configFingerprint content fingerprint of the applied
-     *     {@link RouteTemplateConfig}, so config swaps under the same version
-     *     re-roll future segments
+     * @param config the applied {@link RouteTemplateConfig}; the SHA-256
+     *     digest of all eleven fields is mixed into the seed, so config swaps
+     *     under the same version re-roll future segments
      * @param segmentIndex route segment, starting at 1
      */
     public static long segmentSeed(
             long campaignSeed,
             int routeIndex,
             int routeRulesVersion,
-            long configFingerprint,
+            RouteTemplateConfig config,
             int segmentIndex) {
         if (routeIndex < 0) {
             throw new IllegalArgumentException("Route index must not be negative");
@@ -127,10 +133,13 @@ public final class RouteSegmentPlanner {
         if (segmentIndex < 1) {
             throw new IllegalArgumentException("Route segments start at 1");
         }
+        RouteTemplateConfig.SeedSalt configSalt =
+                Objects.requireNonNull(config, "config").seedSalt();
         long mixed = campaignSeed
                 ^ INDEX_CONSTANT_ROUTE * routeIndex
                 ^ INDEX_CONSTANT_RULES * routeRulesVersion
-                ^ INDEX_CONSTANT_CONFIG * configFingerprint
+                ^ INDEX_CONSTANT_CONFIG_LO * configSalt.lo()
+                ^ INDEX_CONSTANT_CONFIG_HI * configSalt.hi()
                 ^ INDEX_CONSTANT_SEGMENT * segmentIndex;
         return avalanche(mixed);
     }
@@ -149,7 +158,7 @@ public final class RouteSegmentPlanner {
     }
 
     private RouteSegmentPlan compute(int segment) {
-        long seed = segmentSeed(campaignSeed, routeIndex, routeRulesVersion, configFingerprint, segment);
+        long seed = segmentSeed(campaignSeed, routeIndex, routeRulesVersion, config, segment);
         SegmentTemplate template = selectTemplate(segment, seed);
         List<RoutePoi> pois = poisFor(template, seed);
         if (pois.size() > config.maxPoiSlots()) {

@@ -15,6 +15,16 @@ class RouteSegmentPlannerTest {
     private static final int SAMPLE_SEGMENTS = 256;
     private static final int MIX_SCAN_SEGMENTS = 2048;
     private static final int TEMPLATE_SCAN_SEGMENTS = 4096;
+    /** 'S' station / 'T' straight for segments 2..64 of the coin-flip config. */
+    private static final String COINFLIP_GOLDEN_TEMPLATES =
+            "TTTTSSTTTSSSSTSSSTTSTSTSSSSSTTTTSTSTTTSSTSTSTSTSTTTTSTTSSTSTSSS";
+    /** (segment, anchorOffset) of the first 32 POIs of the default config. */
+    private static final int[][] GOLDEN_POI_ANCHORS = {
+        {3, 20}, {6, 35}, {10, 35}, {13, 26}, {14, 29}, {19, 21}, {23, 25}, {24, 25},
+        {25, 23}, {27, 47}, {33, 24}, {41, 31}, {42, 16}, {43, 20}, {45, 34}, {46, 26},
+        {50, 35}, {51, 19}, {54, 38}, {56, 18}, {59, 46}, {63, 20}, {66, 30}, {68, 30},
+        {69, 23}, {71, 30}, {74, 22}, {76, 39}, {81, 39}, {86, 25}, {87, 35}, {90, 38},
+    };
 
     @Test
     void sameInputsProduceIdenticalPlans() {
@@ -194,37 +204,54 @@ class RouteSegmentPlannerTest {
 
     @Test
     void templateDrawsFollowJavaUtilRandomSequence() {
-        // With exactly two candidate weights the template selection reduces to
-        // one draw: STATION iff the first roll is 0. Pinning the roll source to
-        // java.util.Random guards save compatibility, because SplittableRandom
-        // does not promise a stable sequence across JVM versions.
+        // Cross-JVM compatibility baseline recorded from this machine's
+        // JDK 21: the literals pin java.util.Random's bounded nextLong
+        // behavior, so a future JDK that changes bounded-draw internals
+        // fails these assertions instead of silently re-rolling committed
+        // routes. SplittableRandom offers no such stability promise, which
+        // is why the planner draws from java.util.Random.
+        assertEquals(1L, new Random(CAMPAIGN_SEED).nextLong(0, 2));
+        // With exactly two candidate weights the template selection reduces
+        // to one draw: STATION iff the first roll is 0. The golden string
+        // records the resulting templates of segments 2..64 ('S' station,
+        // 'T' straight); a mismatch means either the seed derivation or the
+        // JDK draw changed.
         RouteTemplateConfig coinFlip =
                 RouteTemplateConfig.DEFAULT.withWeights(1, 1, 0, 0).withStationMinGap(0);
         RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, coinFlip);
+        StringBuilder actual = new StringBuilder(COINFLIP_GOLDEN_TEMPLATES.length());
         for (int segment = 2; segment <= 64; segment++) {
-            long seed = RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, coinFlip.fingerprint(), segment);
-            SegmentTemplate expected = new Random(seed).nextLong(0, 2) == 0
-                    ? SegmentTemplate.STATION
-                    : SegmentTemplate.STRAIGHT;
-            assertEquals(expected, planner.plan(segment).template(), "segment " + segment);
+            actual.append(
+                    planner.plan(segment).template() == SegmentTemplate.STATION ? 'S' : 'T');
         }
+        assertEquals(COINFLIP_GOLDEN_TEMPLATES, actual.toString());
     }
 
     @Test
     void poiAnchorDrawsFollowJavaUtilRandomSequence() {
+        // Cross-JVM compatibility baseline recorded from this machine's
+        // JDK 21: the literals pin java.util.Random's bounded nextInt
+        // behavior, so a future JDK that changes bounded-draw internals
+        // fails these assertions instead of silently re-rolling committed
+        // routes.
+        assertEquals(16, new Random(CAMPAIGN_SEED).nextInt(16, 49));
         RouteTemplateConfig config = RouteTemplateConfig.DEFAULT;
         RouteSegmentPlanner planner = new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, config);
-        boolean foundPoi = false;
-        for (int segment = 1; segment <= MIX_SCAN_SEGMENTS; segment++) {
-            RouteSegmentPlan plan = planner.plan(segment);
-            for (RoutePoi poi : plan.pois()) {
-                foundPoi = true;
-                long slotSeed = RouteSegmentPlanner.poiSeed(plan.segmentSeed(), 0);
-                int expected = new Random(slotSeed).nextInt(config.poiAnchorMin(), config.poiAnchorMax() + 1);
-                assertEquals(expected, poi.anchorOffset(), "segment " + segment);
+        int checked = 0;
+        for (int segment = 1;
+                segment <= MIX_SCAN_SEGMENTS && checked < GOLDEN_POI_ANCHORS.length;
+                segment++) {
+            for (RoutePoi poi : planner.plan(segment).pois()) {
+                assertEquals(
+                        GOLDEN_POI_ANCHORS[checked][0], segment, "POI #" + checked + " segment");
+                assertEquals(
+                        GOLDEN_POI_ANCHORS[checked][1],
+                        poi.anchorOffset(),
+                        "POI #" + checked + " anchor");
+                checked++;
             }
         }
-        assertTrue(foundPoi);
+        assertEquals(GOLDEN_POI_ANCHORS.length, checked, "not all golden POIs found");
     }
 
     @Test
@@ -235,8 +262,8 @@ class RouteSegmentPlannerTest {
                     RouteSegmentPlanner.segmentSeed(
                             CAMPAIGN_SEED,
                             0,
-                            1,
-                            RouteTemplateConfig.DEFAULT.fingerprint(),
+                            RouteSegmentPlanner.DEFAULT_ROUTE_RULES_VERSION,
+                            RouteTemplateConfig.DEFAULT,
                             segment),
                     planner.plan(segment).segmentSeed());
         }
@@ -244,31 +271,24 @@ class RouteSegmentPlannerTest {
 
     @Test
     void segmentSeedReactsToEachInput() {
-        long defaultFingerprint = RouteTemplateConfig.DEFAULT.fingerprint();
-        long seed = RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, defaultFingerprint, 7);
+        RouteTemplateConfig config = RouteTemplateConfig.DEFAULT;
+        long seed = RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 7);
         assertNotEquals(0L, seed);
-        assertEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, defaultFingerprint, 7));
+        assertEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 7));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, config, 7));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 1, 1, config, 7));
         assertNotEquals(
                 seed,
-                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 2, defaultFingerprint, 7));
-        assertNotEquals(
-                seed,
-                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 1, 1, defaultFingerprint, 7));
-        assertNotEquals(
-                seed,
-                RouteSegmentPlanner.segmentSeed(
-                        CAMPAIGN_SEED + 1, 0, 1, defaultFingerprint, 7));
+                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED + 1, 0, 1, config, 7));
         assertNotEquals(
                 seed,
                 RouteSegmentPlanner.segmentSeed(
                         CAMPAIGN_SEED,
                         0,
                         1,
-                        RouteTemplateConfig.DEFAULT.withStationMinGap(3).fingerprint(),
+                        RouteTemplateConfig.DEFAULT.withStationMinGap(3),
                         7));
-        assertNotEquals(
-                seed,
-                RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, defaultFingerprint, 8));
+        assertNotEquals(seed, RouteSegmentPlanner.segmentSeed(CAMPAIGN_SEED, 0, 1, config, 8));
     }
 
     @Test
@@ -301,7 +321,7 @@ class RouteSegmentPlannerTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> RouteSegmentPlanner.segmentSeed(
-                        CAMPAIGN_SEED, 0, 1, RouteTemplateConfig.DEFAULT.fingerprint(), 0));
+                        CAMPAIGN_SEED, 0, 1, RouteTemplateConfig.DEFAULT, 0));
     }
 
     @Test
@@ -312,6 +332,9 @@ class RouteSegmentPlannerTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 0));
+        assertThrows(
+                NullPointerException.class,
+                () -> new RouteSegmentPlanner(CAMPAIGN_SEED, 0, 1, null));
     }
 
     @Test

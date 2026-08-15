@@ -85,7 +85,9 @@ Minecraft 单人世界本身也运行逻辑服务器。三种玩法只在服务�
 
 ### 3.2 `RouteDirector`
 
-- 以 `campaignSeed + routeIndex + routeRulesVersion` 规划逻辑区段。
+- 以 `campaignSeed + routeIndex + routeRulesVersion + 配置全字段 SHA-256 摘要（两个 long）`
+  派生种子规划逻辑区段（rules version 2 起；version 1 为历史草案，用
+  SplittableRandom 且不混入配置字段）。
 - 保证主线路径有且只有一个可继续前进的出口；支线不得替代主线出口。
 - 当前锁定 TongDa 1.1.3 的公开 Track Spawner 表面实现 64 格直线区段，并逐格
   验证真实 Create `XO` 轨道后才提交持久化进度。
@@ -319,9 +321,12 @@ NOT_STARTED
 单一全局 PRNG 容易因新增一次随机调用而改变后续所有路线。因此每个区段、兴趣点和任务都使用独立派生种子，例如哈希：
 
 ```text
-segmentSeed = hash(campaignSeed, routeRulesVersion, segmentIndex)
+segmentSeed = avalanche(mix(campaignSeed, routeIndex, routeRulesVersion,
+                     configSeedSalt.lo, configSeedSalt.hi, segmentIndex))
 missionSeed = hash(segmentSeed, "mission", slotIndex)
 ```
+
+`configSeedSalt` 是配置 11 个字段序列的 SHA-256 摘要拆成的两个 long，任一字段变化都会改变摘要；rules version 1 为历史草案（SplittableRandom 且不混入配置字段），version 2 起使用 `java.util.Random` 并混入全字段摘要。单 long 指纹折叠已被证明必然碰撞（2^93 种配置无法单射进 2^64），不再使用。
 
 ### 7.2 生成窗口
 
