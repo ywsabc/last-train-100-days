@@ -7,6 +7,7 @@ import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.OptionalMissionPolicy;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
+import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -50,6 +51,7 @@ public final class CampaignSavedData extends SavedData {
     private int schemaVersion = CURRENT_SCHEMA;
     private UUID campaignId = UUID.randomUUID();
     private long campaignSeed;
+    private CampaignMode mode = CampaignMode.STORY_100_DAYS;
     private CampaignStatus status = CampaignStatus.NOT_STARTED;
     private int day = 1;
     private int activeTicksIntoDay;
@@ -113,8 +115,9 @@ public final class CampaignSavedData extends SavedData {
             data.campaignId = UUID.randomUUID();
         }
         data.campaignSeed = tag.getLong("campaign_seed");
+        data.mode = CampaignMode.fromSerializedName(tag.getString("mode"));
         data.status = CampaignStatus.fromSerializedName(tag.getString("status"));
-        data.day = Math.clamp(tag.getInt("day"), 1, FINAL_DAY);
+        data.day = Math.clamp(tag.getInt("day"), 1, maxDay(data.mode));
         data.activeTicksIntoDay = Math.max(0, tag.getInt("active_ticks_into_day"));
         data.totalActiveTicks = Math.max(0L, tag.getLong("total_active_ticks"));
         data.routeSegment = Math.clamp(tag.getInt("route_segment"), 0, MAX_ROUTE_SEGMENT);
@@ -158,7 +161,7 @@ public final class CampaignSavedData extends SavedData {
                 tag.getInt("rescue_count"),
                 0,
                 TrainRecoveryPolicy.RESCUE_COUNT_LIMIT);
-        data.lastRescueDay = Math.clamp(tag.getInt("last_rescue_day"), 0, FINAL_DAY);
+        data.lastRescueDay = Math.clamp(tag.getInt("last_rescue_day"), 0, maxDay(data.mode));
         data.trainMissingTicks = Math.clamp(
                 tag.getInt("train_missing_ticks"),
                 0,
@@ -202,6 +205,7 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("schema_version", CURRENT_SCHEMA);
         tag.putString("campaign_id", campaignId.toString());
         tag.putLong("campaign_seed", campaignSeed);
+        tag.putString("mode", mode.serializedName());
         tag.putString("status", status.name());
         tag.putInt("day", day);
         tag.putInt("active_ticks_into_day", activeTicksIntoDay);
@@ -481,6 +485,7 @@ public final class CampaignSavedData extends SavedData {
 
     private void migrateFinaleState(int loadedSchema) {
         FinalePolicy.MigratedState migrated = FinalePolicy.migrate(
+                mode,
                 loadedSchema,
                 status,
                 day,
@@ -504,7 +509,21 @@ public final class CampaignSavedData extends SavedData {
         if (activeMission == null) {
             activeKeyMission = null;
         }
+        if (mode == CampaignMode.ENDLESS) {
+            // A mode switch keeps the completed finale receipt for history,
+            // but releases the story-only hub reservation and timer gates.
+            finalDayElapsed = false;
+            finaleHubRouteSegment = 0;
+            if (isFinaleMission(activeMission)) {
+                activeMission = null;
+                activeKeyMission = null;
+            }
+        }
         schemaVersion = CURRENT_SCHEMA;
+    }
+
+    private static int maxDay(CampaignMode mode) {
+        return mode == CampaignMode.ENDLESS ? Integer.MAX_VALUE : FINAL_DAY;
     }
 
     public void initialize(long worldSeed) {
@@ -555,6 +574,7 @@ public final class CampaignSavedData extends SavedData {
         }
 
         PursuitPolicy.Sample next = PursuitPolicy.sample(
+                mode,
                 attention,
                 pursuitDistance,
                 routeSegment,
@@ -571,6 +591,7 @@ public final class CampaignSavedData extends SavedData {
 
         if (activeTicksIntoDay >= DEFAULT_ACTIVE_TICKS_PER_DAY
                 || !PursuitPolicy.shouldTriggerSiege(
+                        mode,
                         status,
                         day,
                         next.pursuitDistance(),
@@ -620,6 +641,25 @@ public final class CampaignSavedData extends SavedData {
         return start(null);
     }
 
+    /**
+     * Converts a completed story save to the post-victory endless pacing
+     * model. World ownership and all durable mission/team state remain in
+     * place; only story-only timing gates are released.
+     */
+    public boolean enableEndlessMode() {
+        if (mode != CampaignMode.STORY_100_DAYS
+                || status != CampaignStatus.COMPLETED) {
+            return false;
+        }
+        mode = CampaignMode.ENDLESS;
+        status = CampaignStatus.RUNNING;
+        finalDayElapsed = false;
+        finaleHubRouteSegment = 0;
+        activeKeyMission = null;
+        setDirty();
+        return true;
+    }
+
     public TickOutcome tick() {
         return tick(effectivePlayers);
     }
@@ -635,7 +675,7 @@ public final class CampaignSavedData extends SavedData {
             return finaleOutcome;
         }
 
-        if (finalDayElapsed) {
+        if (mode != CampaignMode.ENDLESS && finalDayElapsed) {
             return TickOutcome.NONE;
         }
 
@@ -653,7 +693,7 @@ public final class CampaignSavedData extends SavedData {
         }
 
         activeTicksIntoDay -= DEFAULT_ACTIVE_TICKS_PER_DAY;
-        if (day >= FINAL_DAY) {
+        if (mode != CampaignMode.ENDLESS && day >= FINAL_DAY) {
             finalDayElapsed = true;
             activeTicksIntoDay = 0;
             setDirty();
@@ -663,10 +703,10 @@ public final class CampaignSavedData extends SavedData {
                     : TickOutcome.FINAL_DAY_ELAPSED;
         }
 
-        day++;
-        threat = Math.min(100, threat + 1 + day / 20);
+        day = nextDay(day, 1, mode);
+        threat = nextThreat(threat, 1, day);
         ensureFinaleHub();
-        if (day >= FINAL_DAY) {
+        if (mode != CampaignMode.ENDLESS && day >= FINAL_DAY) {
             TickOutcome started = reconcileFinaleState();
             setDirty();
             return started == TickOutcome.FINALE_MISSION_STARTED
@@ -688,18 +728,20 @@ public final class CampaignSavedData extends SavedData {
             status = CampaignStatus.RUNNING;
         }
 
-        day = Math.min(FINAL_DAY, day + amount);
-        threat = Math.min(100, threat + amount + day / 20);
+        day = nextDay(day, amount, mode);
+        threat = nextThreat(threat, amount, day);
         activeTicksIntoDay = 0;
         ensureFinaleHub();
-        if (day < FINAL_DAY) {
+        if (mode == CampaignMode.ENDLESS || day < FINAL_DAY) {
             tryGenerateDailyMission();
         }
         setDirty();
     }
 
     public boolean advanceRoute(int amount) {
-        if (amount <= 0 || routeSegment >= MAX_ROUTE_SEGMENT) {
+        if (amount <= 0
+                || status != CampaignStatus.RUNNING
+                || routeSegment >= MAX_ROUTE_SEGMENT) {
             return false;
         }
         long requestedRoute = Math.min(
@@ -728,7 +770,7 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean markRouteSegmentGenerated(int segment) {
-        if (segment <= generatedRouteSegment) {
+        if (segment <= generatedRouteSegment || segment > MAX_ROUTE_SEGMENT) {
             return false;
         }
         if (segment != generatedRouteSegment + 1) {
@@ -743,15 +785,27 @@ public final class CampaignSavedData extends SavedData {
         return true;
     }
 
+    private static int nextDay(int currentDay, int amount, CampaignMode mode) {
+        long candidate = (long) Math.max(1, currentDay) + Math.max(0, amount);
+        return (int) Math.min(maxDay(mode), candidate);
+    }
+
+    private static int nextThreat(int currentThreat, int days, int currentDay) {
+        long next = (long) Math.max(0, currentThreat)
+                + Math.max(0, days)
+                + Math.max(1, currentDay) / 20L;
+        return (int) Math.min(100L, next);
+    }
+
     public boolean createMission(MissionType type) {
         return createMission(type, effectivePlayers);
     }
 
     public boolean createMission(MissionType type, int teamSize) {
         if (type == null
-                || !FinalePolicy.allowsOrdinaryMission(status, day)
+                || !FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || (CampaignPacingPolicy.isMainlineMission(type)
-                        && !FinalePolicy.allowsOrdinaryMainlineMission(status, day))
+                        && !FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day))
                 || activeMission != null
                 || type.category() != MissionType.Category.MAIN
                 || !MissionPoolPolicy.mayCreateMainline(missionHistory, type)) {
@@ -784,6 +838,7 @@ public final class CampaignSavedData extends SavedData {
                 && !scheduledKeyMissions.contains(keyMission)
                 && activeMission == null
                 && CampaignPacingPolicy.isKeyMissionEligible(
+                        mode,
                         keyMission,
                         day,
                         routeSegment);
@@ -888,7 +943,7 @@ public final class CampaignSavedData extends SavedData {
      * tick deadline captured from the current active-tick counter.
      */
     public boolean proposeOptionalMission(MissionType type) {
-        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+        if (!FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || proposedMission != null
                 || activeOptionalCount() >= OptionalMissionPolicy.MAX_ACTIVE_OPTIONAL_MISSIONS
                 || !OptionalMissionPolicy.isOptional(type)) {
@@ -1647,7 +1702,7 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private boolean tryGenerateDailyMission() {
-        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+        if (!FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || activeMission != null
                 || day < 2) {
             return false;
@@ -1674,7 +1729,7 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private boolean tryGenerateRouteMission() {
-        if (!FinalePolicy.allowsOrdinaryMission(status, day)
+        if (!FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || activeMission != null
                 || routeSegment < 1) {
             return false;
@@ -1693,6 +1748,7 @@ public final class CampaignSavedData extends SavedData {
 
     private boolean tryGenerateNextKeyMission() {
         return CampaignPacingPolicy.nextKeyMission(
+                        mode,
                         day,
                         routeSegment,
                         scheduledKeyMissions)
@@ -1703,9 +1759,10 @@ public final class CampaignSavedData extends SavedData {
     private boolean createPacedMission(SplittableRandom random) {
         MissionType type = CampaignPacingPolicy.selectMissionType(
                 random,
+                mode,
                 day,
                 routeSegment);
-        if (!FinalePolicy.allowsOrdinaryMainlineMission(status, day)
+        if (!FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day)
                 && CampaignPacingPolicy.isMainlineMission(type)) {
             // The last-ten-day window can still offer supplies, but never
             // spends its only active slot on a fresh ordinary roadblock.
@@ -1724,6 +1781,9 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private TickOutcome reconcileFinaleState() {
+        if (mode == CampaignMode.ENDLESS) {
+            return TickOutcome.NONE;
+        }
         ensureFinaleHub();
         if (day >= FINAL_DAY
                 && activeMission != null
@@ -1736,6 +1796,7 @@ public final class CampaignSavedData extends SavedData {
             setDirty();
         }
         FinalePolicy.Directive directive = FinalePolicy.nextDirective(
+                mode,
                 status,
                 day,
                 finalDayElapsed,
@@ -1766,7 +1827,7 @@ public final class CampaignSavedData extends SavedData {
 
     /** Reserves a new, unexplored hub window whenever the final phase is open. */
     private boolean ensureFinaleHub() {
-        if (!FinalePolicy.finaleHubWindowOpen(status, day)) {
+        if (!FinalePolicy.finaleHubWindowOpen(mode, status, day)) {
             return false;
         }
         if (FinalePolicy.isFinaleHubInForwardWindow(routeSegment, finaleHubRouteSegment)) {
@@ -1838,6 +1899,10 @@ public final class CampaignSavedData extends SavedData {
         return status;
     }
 
+    public CampaignMode mode() {
+        return mode;
+    }
+
     public int day() {
         return day;
     }
@@ -1855,15 +1920,19 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public int expectedRouteSegment() {
-        return CampaignPacingPolicy.expectedRouteSegment(day);
+        return CampaignPacingPolicy.expectedRouteSegment(mode, day);
     }
 
     public CampaignPacingPolicy.MissionWeights pacingWeights() {
-        return CampaignPacingPolicy.missionWeights(day, routeSegment);
+        return CampaignPacingPolicy.missionWeights(mode, day, routeSegment);
     }
 
     public int generatedRouteSegment() {
         return generatedRouteSegment;
+    }
+
+    public boolean routeSafetyLimitReached() {
+        return RouteProgressPolicy.isAtSafetyLimit(routeSegment, MAX_ROUTE_SEGMENT);
     }
 
     public int threat() {

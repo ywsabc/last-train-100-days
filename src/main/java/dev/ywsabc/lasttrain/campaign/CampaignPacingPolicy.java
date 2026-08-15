@@ -28,6 +28,10 @@ public final class CampaignPacingPolicy {
         return RouteProgressPolicy.expectedRouteSegment(day);
     }
 
+    public static int expectedRouteSegment(CampaignMode mode, int day) {
+        return RouteProgressPolicy.expectedRouteSegment(mode, day);
+    }
+
     public static RouteProgressPolicy.PaceAssessment pace(int day, int routeSegment) {
         return RouteProgressPolicy.assess(day, routeSegment);
     }
@@ -37,6 +41,21 @@ public final class CampaignPacingPolicy {
             int routeSegment,
             RouteProgressPolicy.MileageLine mileageLine) {
         return RouteProgressPolicy.assess(day, routeSegment, mileageLine);
+    }
+
+    public static RouteProgressPolicy.PaceAssessment pace(
+            CampaignMode mode,
+            int day,
+            int routeSegment) {
+        return RouteProgressPolicy.assess(mode, day, routeSegment);
+    }
+
+    public static RouteProgressPolicy.PaceAssessment pace(
+            CampaignMode mode,
+            int day,
+            int routeSegment,
+            RouteProgressPolicy.MileageLine mileageLine) {
+        return RouteProgressPolicy.assess(mode, day, routeSegment, mileageLine);
     }
 
     public static Chapter chapterForDay(int day) {
@@ -62,6 +81,13 @@ public final class CampaignPacingPolicy {
         return Chapter.FINALE;
     }
 
+    public static Chapter chapterForDay(CampaignMode mode, int day) {
+        if (mode == CampaignMode.ENDLESS) {
+            return Chapter.ENDLESS;
+        }
+        return chapterForDay(day);
+    }
+
     /**
      * A key location cannot be selected before both its chapter day and its
      * minimum verified route segment have been reached.
@@ -73,6 +99,15 @@ public final class CampaignPacingPolicy {
         Objects.requireNonNull(keyMission, "keyMission");
         return day >= keyMission.chapter.startDay
                 && routeSegment >= keyMission.minimumRouteSegment;
+    }
+
+    public static boolean isKeyMissionEligible(
+            CampaignMode mode,
+            KeyMission keyMission,
+            int day,
+            int routeSegment) {
+        return mode != CampaignMode.ENDLESS
+                && isKeyMissionEligible(keyMission, day, routeSegment);
     }
 
     /** Returns the first not-yet-committed key mission that may be offered now. */
@@ -87,6 +122,17 @@ public final class CampaignPacingPolicy {
                 .findFirst();
     }
 
+    public static Optional<KeyMission> nextKeyMission(
+            CampaignMode mode,
+            int day,
+            int routeSegment,
+            Set<KeyMission> committedKeyMissions) {
+        if (mode == CampaignMode.ENDLESS) {
+            return Optional.empty();
+        }
+        return nextKeyMission(day, routeSegment, committedKeyMissions);
+    }
+
     public static boolean isMainlineMission(MissionType type) {
         return type == MissionType.RAIL_BREAK
                 || type == MissionType.STATION_POWER
@@ -95,6 +141,10 @@ public final class CampaignPacingPolicy {
 
     public static boolean allowsMainlineMission(int day) {
         return day < FinalePolicy.FINALE_HUB_START_DAY;
+    }
+
+    public static boolean allowsMainlineMission(CampaignMode mode, int day) {
+        return mode == CampaignMode.ENDLESS || allowsMainlineMission(day);
     }
 
     /**
@@ -140,6 +190,25 @@ public final class CampaignPacingPolicy {
         };
     }
 
+    public static MissionWeights missionWeights(
+            CampaignMode mode,
+            int day,
+            int routeSegment) {
+        return missionWeights(mode, day, routeSegment, RouteProgressPolicy.DEFAULT_MILEAGE_LINE);
+    }
+
+    public static MissionWeights missionWeights(
+            CampaignMode mode,
+            int day,
+            int routeSegment,
+            RouteProgressPolicy.MileageLine mileageLine) {
+        return switch (pace(mode, day, routeSegment, mileageLine).pace()) {
+            case BEHIND -> new MissionWeights(25, 140, 35, 100);
+            case ON_TRACK -> new MissionWeights(80, 55, 70, 100);
+            case AHEAD -> new MissionWeights(80, 55, 150, 100);
+        };
+    }
+
     /**
      * Deterministically chooses an ordinary mission type using the current
      * pace profile. The low-value forced-obstacle bucket is split evenly over
@@ -169,13 +238,38 @@ public final class CampaignPacingPolicy {
         };
     }
 
+    public static MissionType selectMissionType(
+            SplittableRandom random,
+            CampaignMode mode,
+            int day,
+            int routeSegment) {
+        Objects.requireNonNull(random, "random");
+        MissionWeights weights = missionWeights(mode, day, routeSegment);
+        int lowValueWeight = weights.lowValueForcedObstacleWeight();
+        int supplyWeight = weights.fuelSupplyGuaranteeWeight();
+        int total = lowValueWeight + supplyWeight;
+        if (total <= 0) {
+            return MissionType.SUPPLY_RECOVERY;
+        }
+        int roll = random.nextInt(total);
+        if (roll >= lowValueWeight) {
+            return MissionType.SUPPLY_RECOVERY;
+        }
+        return switch (roll % 3) {
+            case 0 -> MissionType.RAIL_BREAK;
+            case 1 -> MissionType.STATION_POWER;
+            default -> MissionType.STATION_GATE;
+        };
+    }
+
     public enum Chapter {
         PROLOGUE(1, 10),
         SCARCITY(11, 30),
         SPREAD(31, 55),
         COLLAPSE(56, 80),
         FINAL_LEG(81, 99),
-        FINALE(100, 100);
+        FINALE(100, 100),
+        ENDLESS(101, Integer.MAX_VALUE);
 
         private final int startDay;
         private final int endDay;

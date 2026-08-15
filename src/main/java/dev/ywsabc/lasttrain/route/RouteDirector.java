@@ -1,6 +1,7 @@
 package dev.ywsabc.lasttrain.route;
 
 import dev.ywsabc.lasttrain.LastTrain;
+import dev.ywsabc.lasttrain.campaign.CampaignMode;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.integration.TongDaTrackBridge;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
@@ -33,6 +34,7 @@ public final class RouteDirector {
     private static final int VEHICLE_CLEARANCE_RADIUS = 3;
     private static final int VEHICLE_CLEARANCE_HEIGHT = 6;
     private static boolean missingCreateTrackLogged;
+    private static boolean safetyLimitLogged;
     private static int lastReportedTongDaSegment = -1;
     private static TongDaTrackBridge.SubmissionStatus lastReportedTongDaStatus;
 
@@ -41,6 +43,7 @@ public final class RouteDirector {
 
     public static void tick(MinecraftServer server, CampaignSavedData data, int serverTick) {
         if (serverTick % TICK_INTERVAL != 0
+                || !RouteProgressPolicy.allowsRouteGeneration(data.mode(), data.status())
                 || !data.starterStationBuilt()
                 || !ModList.get().isLoaded("create")
                 || !ModList.get().isLoaded(TongDaTrackBridge.TONGDA_MOD_ID)) {
@@ -75,13 +78,24 @@ public final class RouteDirector {
         int desiredSegment = Math.max(
                 SEGMENTS_AHEAD,
                 Math.max(data.routeSegment(), occupiedSegment) + SEGMENTS_AHEAD);
+        if (data.routeSafetyLimitReached()) {
+            if (!safetyLimitLogged) {
+                safetyLimitLogged = true;
+                LastTrain.LOGGER.warn(
+                        "Route safety limit of {} reached; endless generation is paused with existing world intact",
+                        CampaignSavedData.MAX_ROUTE_SEGMENT);
+            }
+            return;
+        }
+        safetyLimitLogged = false;
         ActiveMission mission = data.activeMission();
         if (mission != null) {
             desiredSegment = Math.max(
                     desiredSegment,
                     RouteGeometry.missionSegment(mission.routeSegment()));
         }
-        if (data.finaleHubRouteSegment() > 0) {
+        if (data.mode() == CampaignMode.STORY_100_DAYS
+                && data.finaleHubRouteSegment() > 0) {
             // Once the final window is reserved, materialize through the
             // announced hub even before the day-100 mission is instantiated.
             desiredSegment = Math.max(desiredSegment, data.finaleHubRouteSegment());

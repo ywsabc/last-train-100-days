@@ -47,6 +47,22 @@ public final class PursuitPolicy {
             int currentRouteSegment,
             int previousRouteSegment,
             int day) {
+        return sample(
+                CampaignMode.STORY_100_DAYS,
+                attention,
+                pursuitDistance,
+                currentRouteSegment,
+                previousRouteSegment,
+                day);
+    }
+
+    public static Sample sample(
+            CampaignMode mode,
+            int attention,
+            int pursuitDistance,
+            int currentRouteSegment,
+            int previousRouteSegment,
+            int day) {
         int movedSegments = Math.clamp(
                 currentRouteSegment - previousRouteSegment,
                 0,
@@ -54,7 +70,7 @@ public final class PursuitPolicy {
 
         if (movedSegments > 0) {
             attention = Math.max(
-                    minAttention(day),
+                    minAttention(mode, day),
                     attention - movedSegments * MOVING_ATTENTION_COOLING_PER_SEGMENT);
             pursuitDistance = Math.min(
                     MAX_PURSUIT_DISTANCE,
@@ -87,6 +103,16 @@ public final class PursuitPolicy {
             return 45;
         }
         return 60;
+    }
+
+    /** Endless mode raises the floor slowly instead of restarting a curve. */
+    public static int minAttention(CampaignMode mode, int day) {
+        if (mode != CampaignMode.ENDLESS || day <= FinalePolicy.FINAL_DAY) {
+            return minAttention(day);
+        }
+        return Math.min(
+                MAX_ATTENTION,
+                60 + Math.max(0, day - FinalePolicy.FINAL_DAY) / 10);
     }
 
     public static AttentionLevel attentionLevel(int attention) {
@@ -126,8 +152,22 @@ public final class PursuitPolicy {
             int day,
             int pursuitDistance,
             boolean hasActiveMission) {
+        return shouldTriggerSiege(
+                CampaignMode.STORY_100_DAYS,
+                status,
+                day,
+                pursuitDistance,
+                hasActiveMission);
+    }
+
+    public static boolean shouldTriggerSiege(
+            CampaignMode mode,
+            CampaignStatus status,
+            int day,
+            int pursuitDistance,
+            boolean hasActiveMission) {
         return status == CampaignStatus.RUNNING
-                && day < FinalePolicy.FINAL_DAY
+                && (mode == CampaignMode.ENDLESS || day < FinalePolicy.FINAL_DAY)
                 && pursuitDistance <= 0
                 && !hasActiveMission;
     }

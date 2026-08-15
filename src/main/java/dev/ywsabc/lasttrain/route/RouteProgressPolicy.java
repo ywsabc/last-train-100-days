@@ -1,5 +1,8 @@
 package dev.ywsabc.lasttrain.route;
 
+import dev.ywsabc.lasttrain.campaign.CampaignMode;
+import dev.ywsabc.lasttrain.campaign.CampaignStatus;
+
 /**
  * Pure progression limits applied to the physical train's observed position.
  *
@@ -27,6 +30,11 @@ public final class RouteProgressPolicy {
         return expectedRouteSegment(day, DEFAULT_MILEAGE_LINE);
     }
 
+    /** Returns the expected mileage while respecting the selected campaign mode. */
+    public static int expectedRouteSegment(CampaignMode mode, int day) {
+        return expectedRouteSegment(mode, day, DEFAULT_MILEAGE_LINE);
+    }
+
     /** Returns an integer-slope line anchored at day one and segment zero. */
     public static int expectedRouteSegment(int day, int segmentsPerDay) {
         return expectedRouteSegment(
@@ -40,9 +48,28 @@ public final class RouteProgressPolicy {
         return line.expectedRouteSegment(boundedDay);
     }
 
+    /** Mode-aware variant; story pacing keeps its original day-100 clamp. */
+    public static int expectedRouteSegment(
+            CampaignMode mode,
+            int day,
+            MileageLine line) {
+        CampaignMode safeMode = mode == null ? CampaignMode.STORY_100_DAYS : mode;
+        int boundedDay = safeMode == CampaignMode.ENDLESS
+                ? Math.max(FIRST_CAMPAIGN_DAY, day)
+                : Math.clamp(day, FIRST_CAMPAIGN_DAY, FINAL_CAMPAIGN_DAY);
+        return line.expectedRouteSegment(boundedDay);
+    }
+
     /** Classifies actual progress against the default expected mileage line. */
     public static PaceAssessment assess(int day, int actualRouteSegment) {
         return assess(day, actualRouteSegment, DEFAULT_MILEAGE_LINE);
+    }
+
+    public static PaceAssessment assess(
+            CampaignMode mode,
+            int day,
+            int actualRouteSegment) {
+        return assess(mode, day, actualRouteSegment, DEFAULT_MILEAGE_LINE);
     }
 
     /** Classifies actual progress against a configured expected mileage line. */
@@ -57,6 +84,30 @@ public final class RouteProgressPolicy {
                 ? Pace.BEHIND
                 : delta > CLEARLY_AHEAD_MARGIN ? Pace.AHEAD : Pace.ON_TRACK;
         return new PaceAssessment(expected, actual, delta, pace);
+    }
+
+    public static PaceAssessment assess(
+            CampaignMode mode,
+            int day,
+            int actualRouteSegment,
+            MileageLine line) {
+        int expected = expectedRouteSegment(mode, day, line);
+        int actual = Math.max(0, actualRouteSegment);
+        int delta = actual - expected;
+        Pace pace = delta < 0
+                ? Pace.BEHIND
+                : delta > CLEARLY_AHEAD_MARGIN ? Pace.AHEAD : Pace.ON_TRACK;
+        return new PaceAssessment(expected, actual, delta, pace);
+    }
+
+    /** Route generation remains live only for an active campaign. */
+    public static boolean allowsRouteGeneration(CampaignMode mode, CampaignStatus status) {
+        return status == CampaignStatus.RUNNING;
+    }
+
+    /** Explicit diagnostic for the finite safety boundary, not an exception path. */
+    public static boolean isAtSafetyLimit(int currentSegment, int maxSegment) {
+        return currentSegment >= maxSegment;
     }
 
     static int nextSegment(

@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignMode;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
 import dev.ywsabc.lasttrain.campaign.TeamPermissionPolicy;
@@ -39,6 +40,9 @@ public final class LastTrainCommands {
         dispatcher.register(Commands.literal("lasttrain")
                 .then(Commands.literal("status")
                         .executes(LastTrainCommands::status))
+                .then(Commands.literal("mode")
+                        .then(Commands.literal("endless")
+                                .executes(LastTrainCommands::enableEndlessMode)))
                 .then(Commands.literal("start")
                         .requires(source -> source.hasPermission(2))
                         .executes(LastTrainCommands::start))
@@ -154,25 +158,65 @@ public final class LastTrainCommands {
                 .getPlayers().stream()
                 .filter(player -> !player.isSpectator())
                 .count();
-        PursuitPolicy.AttentionLevel attentionLevel =
-                PursuitPolicy.attentionLevel(data.attention());
         context.getSource().sendSuccess(
-                () -> Component.translatable(
-                        "command.lasttrain.status",
-                        data.day(),
-                        CampaignSavedData.FINAL_DAY,
-                        data.status().name(),
-                        data.routeSegment(),
-                        data.threat(),
-                        data.effectivePlayers(),
-                        onlinePlayers,
-                        data.attention(),
-                        Component.translatable(
-                                "attention.lasttrain."
-                                        + attentionLevel.name().toLowerCase(Locale.ROOT)),
-                        data.pursuitDistance()),
+                () -> statusMessage(data, onlinePlayers),
                 false);
         return data.day();
+    }
+
+    static String modeTranslationKey(CampaignMode mode) {
+        CampaignMode safeMode = mode == null ? CampaignMode.STORY_100_DAYS : mode;
+        return "campaign.lasttrain.mode." + safeMode.serializedName();
+    }
+
+    private static Component statusMessage(CampaignSavedData data, int onlinePlayers) {
+        PursuitPolicy.AttentionLevel attentionLevel =
+                PursuitPolicy.attentionLevel(data.attention());
+        return Component.translatable(
+                "command.lasttrain.status",
+                data.day(),
+                data.mode() == CampaignMode.ENDLESS ? "∞" : CampaignSavedData.FINAL_DAY,
+                Component.translatable(modeTranslationKey(data.mode())),
+                data.status().name(),
+                data.routeSegment(),
+                data.threat(),
+                data.effectivePlayers(),
+                onlinePlayers,
+                data.attention(),
+                Component.translatable(
+                        "attention.lasttrain."
+                                + attentionLevel.name().toLowerCase(Locale.ROOT)),
+                data.pursuitDistance());
+    }
+
+    private static int enableEndlessMode(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        if (!mayPerformTeamOperation(
+                context,
+                data,
+                TeamPermissionPolicy.Operation.ENABLE_ENDLESS_MODE)) {
+            return 0;
+        }
+        if (data.mode() == CampaignMode.ENDLESS) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mode.already_endless"));
+            return 0;
+        }
+        if (data.status() != CampaignStatus.COMPLETED) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mode.requires_completed"));
+            return 0;
+        }
+        if (!data.enableEndlessMode()) {
+            context.getSource().sendFailure(
+                    Component.translatable("command.lasttrain.mode.switch_refused"));
+            return 0;
+        }
+        IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
+        context.getSource().sendSuccess(
+                () -> Component.translatable("command.lasttrain.mode.endless_enabled"),
+                true);
+        return 1;
     }
 
     private static int start(CommandContext<CommandSourceStack> context) {
@@ -225,7 +269,14 @@ public final class LastTrainCommands {
         if (!requireAdminTeamPlayer(context, data)) {
             return 0;
         }
-        data.advanceRoute(segments);
+        if (!data.advanceRoute(segments)) {
+            context.getSource().sendFailure(
+                    Component.translatable(
+                            data.routeSafetyLimitReached()
+                                    ? "command.lasttrain.route.safety_limit"
+                                    : "command.lasttrain.route.no_progress"));
+            return 0;
+        }
         context.getSource().sendSuccess(
                 () -> Component.translatable("command.lasttrain.route_advanced", data.routeSegment()),
                 true);

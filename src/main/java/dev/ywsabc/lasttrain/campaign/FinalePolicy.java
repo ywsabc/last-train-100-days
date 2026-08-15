@@ -15,10 +15,10 @@ public final class FinalePolicy {
      * Schema 7 added the optional mission system (proposals, optional mission
      * list, reward receipts, pending site cleanups, mission history and team
      * membership). Schema 8 adds captain hand-off timestamps and the durable
-     * in-session vote record; old saves use safe empty/default values and
-     * pending votes are intentionally discarded on reload.
+     * in-session vote record. Schema 9 adds the persistent campaign mode; old
+     * saves use STORY_100_DAYS when the mode key is absent.
      */
-    public static final int CURRENT_SCHEMA = 8;
+    public static final int CURRENT_SCHEMA = 9;
     public static final int FINAL_DAY = 100;
     public static final int FINALE_HUB_START_DAY = 90;
     public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;
@@ -34,7 +34,25 @@ public final class FinalePolicy {
             boolean finalDayElapsed,
             boolean finaleMissionCompleted,
             boolean hasActiveMission) {
-        if (status != CampaignStatus.RUNNING || day < FINAL_DAY) {
+        return nextDirective(
+                CampaignMode.STORY_100_DAYS,
+                status,
+                day,
+                finalDayElapsed,
+                finaleMissionCompleted,
+                hasActiveMission);
+    }
+
+    public static Directive nextDirective(
+            CampaignMode mode,
+            CampaignStatus status,
+            int day,
+            boolean finalDayElapsed,
+            boolean finaleMissionCompleted,
+            boolean hasActiveMission) {
+        if (mode == CampaignMode.ENDLESS
+                || status != CampaignStatus.RUNNING
+                || day < FINAL_DAY) {
             return Directive.NONE;
         }
         if (finalDayElapsed && finaleMissionCompleted && !hasActiveMission) {
@@ -47,17 +65,41 @@ public final class FinalePolicy {
     }
 
     public static boolean allowsOrdinaryMission(CampaignStatus status, int day) {
-        return status == CampaignStatus.RUNNING && day < FINAL_DAY;
+        return allowsOrdinaryMission(CampaignMode.STORY_100_DAYS, status, day);
+    }
+
+    public static boolean allowsOrdinaryMission(
+            CampaignMode mode,
+            CampaignStatus status,
+            int day) {
+        return status == CampaignStatus.RUNNING
+                && (mode == CampaignMode.ENDLESS || day < FINAL_DAY);
     }
 
     /** Ordinary mainline roadblocks stop competing for the finale window on day 90. */
     public static boolean allowsOrdinaryMainlineMission(CampaignStatus status, int day) {
+        return allowsOrdinaryMainlineMission(CampaignMode.STORY_100_DAYS, status, day);
+    }
+
+    public static boolean allowsOrdinaryMainlineMission(
+            CampaignMode mode,
+            CampaignStatus status,
+            int day) {
         return status == CampaignStatus.RUNNING
-                && day < FINALE_HUB_START_DAY;
+                && (mode == CampaignMode.ENDLESS || day < FINALE_HUB_START_DAY);
     }
 
     public static boolean finaleHubWindowOpen(CampaignStatus status, int day) {
-        return status == CampaignStatus.RUNNING && day >= FINALE_HUB_START_DAY;
+        return finaleHubWindowOpen(CampaignMode.STORY_100_DAYS, status, day);
+    }
+
+    public static boolean finaleHubWindowOpen(
+            CampaignMode mode,
+            CampaignStatus status,
+            int day) {
+        return mode != CampaignMode.ENDLESS
+                && status == CampaignStatus.RUNNING
+                && day >= FINALE_HUB_START_DAY;
     }
 
     /** Returns the finite, strictly-forward hub reservation window. */
@@ -111,9 +153,38 @@ public final class FinalePolicy {
             boolean finalDayElapsed,
             boolean finaleMissionCompleted,
             boolean hasActiveMission) {
+        return migrate(
+                CampaignMode.STORY_100_DAYS,
+                loadedSchema,
+                status,
+                day,
+                finalDayElapsed,
+                finaleMissionCompleted,
+                hasActiveMission);
+    }
+
+    public static MigratedState migrate(
+            CampaignMode mode,
+            int loadedSchema,
+            CampaignStatus status,
+            int day,
+            boolean finalDayElapsed,
+            boolean finaleMissionCompleted,
+            boolean hasActiveMission) {
         CampaignStatus migratedStatus = status;
         boolean migratedElapsed = finalDayElapsed;
         boolean migratedMissionCompleted = finaleMissionCompleted;
+
+        if (mode == CampaignMode.ENDLESS) {
+            // Endless mode is only created from a completed story save. It no
+            // longer consumes the story finale state machine after reload.
+            return new MigratedState(
+                    migratedStatus == CampaignStatus.COMPLETED
+                            ? CampaignStatus.RUNNING
+                            : migratedStatus,
+                    false,
+                    migratedMissionCompleted);
+        }
 
         if (loadedSchema < FINALE_REOPEN_SCHEMA) {
             // Schema 5 only reached COMPLETED after its final-day timer path.
