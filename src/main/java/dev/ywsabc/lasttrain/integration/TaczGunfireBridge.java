@@ -1,6 +1,7 @@
 package dev.ywsabc.lasttrain.integration;
 
 import dev.ywsabc.lasttrain.LastTrain;
+import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -129,6 +130,7 @@ public final class TaczGunfireBridge {
             if (!claimPulse(shooter, level.getGameTime(), settings.pulseCooldownTicks())) {
                 return;
             }
+            CampaignSavedData.get(level.getServer()).registerGunfire();
             attractLoadedZombies(level, shooter, settings);
         } catch (IllegalAccessException | InvocationTargetException | RuntimeException | LinkageError exception) {
             // An optional integration must never break TaCZ's firing code path.

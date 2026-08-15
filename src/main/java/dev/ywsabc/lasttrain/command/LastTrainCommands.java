@@ -6,6 +6,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
+import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionFallbackPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
@@ -13,6 +14,7 @@ import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.server.IntegrationBridge;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -76,6 +78,8 @@ public final class LastTrainCommands {
                 .getPlayers().stream()
                 .filter(player -> !player.isSpectator())
                 .count();
+        PursuitPolicy.AttentionLevel attentionLevel =
+                PursuitPolicy.attentionLevel(data.attention());
         context.getSource().sendSuccess(
                 () -> Component.translatable(
                         "command.lasttrain.status",
@@ -85,7 +89,12 @@ public final class LastTrainCommands {
                         data.routeSegment(),
                         data.threat(),
                         data.effectivePlayers(),
-                        onlinePlayers),
+                        onlinePlayers,
+                        data.attention(),
+                        Component.translatable(
+                                "attention.lasttrain."
+                                        + attentionLevel.name().toLowerCase(Locale.ROOT)),
+                        data.pursuitDistance()),
                 false);
         return data.day();
     }

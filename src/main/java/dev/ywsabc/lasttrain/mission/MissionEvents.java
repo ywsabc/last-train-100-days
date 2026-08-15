@@ -101,7 +101,9 @@ public final class MissionEvents {
             return;
         }
 
-        ActiveMission mission = CampaignSavedData.get(level.getServer()).activeMission();
+        CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        ActiveMission mission = data.activeMission();
+        data.registerExplosion();
         event.getAffectedBlocks().removeIf(
                 pos -> MissionWorldDirector.isProtectedMissionBlock(mission, pos));
     }

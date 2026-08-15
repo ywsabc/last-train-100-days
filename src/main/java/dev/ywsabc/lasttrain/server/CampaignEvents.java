@@ -77,6 +77,7 @@ public final class CampaignEvents {
                 broadcastFinale(server, data.activeMission());
             }
             case FINALE_MISSION_STARTED -> broadcastFinale(server, data.activeMission());
+            case SIEGE_TRIGGERED -> broadcastSiege(server, data.activeMission());
             case FINAL_DAY_ELAPSED ->
                     broadcast(server, Component.translatable("message.lasttrain.final_day_elapsed"));
             case CAMPAIGN_COMPLETED ->
@@ -106,6 +107,16 @@ public final class CampaignEvents {
         }
         broadcast(server, Component.translatable(
                 "message.lasttrain.finale_started",
+                mission.target(),
+                mission.routeSegment()));
+    }
+
+    private static void broadcastSiege(MinecraftServer server, ActiveMission mission) {
+        if (mission == null) {
+            return;
+        }
+        broadcast(server, Component.translatable(
+                "message.lasttrain.siege_triggered",
                 mission.target(),
                 mission.routeSegment()));
     }

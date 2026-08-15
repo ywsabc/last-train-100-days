@@ -51,14 +51,17 @@
     `lasttrain_players` 同步给 In Control；
 12. 普通任务宽限期与可恢复降级：超时后导演清理路障并加 6 点威胁，终局任务
     不会被时钟自动失败；管理员可用 `/lasttrain mission fail` 手动走同一条
-    降级路径。
+    降级路径；
+13. 抽象后方尸潮：持久化 0–100 关注度与 0–10,000 追击距离；停车和枪声/
+    爆炸缩短追击距离，推进线路拉开距离；追击归零触发一次可交付的尸潮封锁，
+    完成或降级后恢复距离，无玩家在线时不变化。
 
 ## 当前验证边界
 
 已在本地验证 Gradle 构建与单元测试、安装器故障路径，以及真实专服完整模组
 发现后在 `eula=false` 合法停止；GitHub 另已配置每周/手动的同类发现测试。单元
-测试已覆盖有效人数滑窗、任务目标冻结、扩展任务现场布局和任务宽限降级。
-尚未接受
+测试已覆盖有效人数滑窗、任务目标冻结、扩展任务现场布局、任务宽限降级和
+抽象尸潮压力策略。尚未接受
 EULA、创建世界或启动实际战役，因此 Simurail 装配/行驶、TongDa 世界内铺轨、
 TaCZ 实弹交互、单人/LAN/多人重连和百日耐久均未完成运行验收。
 
@@ -70,7 +73,8 @@ TaCZ 实弹交互、单人/LAN/多人重连和百日耐久均未完成运行验�
 玩法设计见 [GAME_DESIGN.md](docs/GAME_DESIGN.md)，技术架构见
 [TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md)，模组兼容策略见
 [COMPATIBILITY.md](docs/COMPATIBILITY.md)，开发阶段见
-[ROADMAP.md](docs/ROADMAP.md)。
+[ROADMAP.md](docs/ROADMAP.md)，规格与质量验收见
+[ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 
 ## 开发环境
 

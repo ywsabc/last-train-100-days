@@ -197,7 +197,9 @@ public final class PlayerEvents {
                 Component.translatable("campaign.lasttrain.status."
                         + data.status().name().toLowerCase(Locale.ROOT)),
                 data.routeSegment(),
-                data.threat()));
+                data.threat(),
+                data.attention(),
+                data.pursuitDistance()));
         ActiveMission mission = data.activeMission();
         if (mission != null) {
             player.sendSystemMessage(Component.translatable(

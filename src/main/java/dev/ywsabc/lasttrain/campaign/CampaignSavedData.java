@@ -57,6 +57,9 @@ public final class CampaignSavedData extends SavedData {
     private int effectivePlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int pendingPlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int scalingHoldTicks;
+    private int attention = PursuitPolicy.INITIAL_ATTENTION;
+    private int pursuitDistance = PursuitPolicy.INITIAL_PURSUIT_DISTANCE;
+    private int lastPursuitRouteSegment;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
 
@@ -116,6 +119,24 @@ public final class CampaignSavedData extends SavedData {
         data.pendingPlayers = PopulationScalingPolicy.clampPlayers(
                 tag.getInt("scaling_pending_players"));
         data.scalingHoldTicks = Math.max(0, tag.getInt("scaling_hold_ticks"));
+        data.attention = tag.contains("attention")
+                ? Math.clamp(
+                        tag.getInt("attention"),
+                        0,
+                        PursuitPolicy.MAX_ATTENTION)
+                : PursuitPolicy.INITIAL_ATTENTION;
+        data.pursuitDistance = tag.contains("pursuit_distance")
+                ? Math.clamp(
+                        tag.getInt("pursuit_distance"),
+                        0,
+                        PursuitPolicy.MAX_PURSUIT_DISTANCE)
+                : PursuitPolicy.INITIAL_PURSUIT_DISTANCE;
+        data.lastPursuitRouteSegment = tag.contains("last_pursuit_route_segment")
+                ? Math.clamp(
+                        tag.getInt("last_pursuit_route_segment"),
+                        0,
+                        MAX_ROUTE_SEGMENT)
+                : data.routeSegment;
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         data.migrateFinaleState(loadedSchema);
@@ -154,6 +175,9 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("scaling_effective_players", effectivePlayers);
         tag.putInt("scaling_pending_players", pendingPlayers);
         tag.putInt("scaling_hold_ticks", scalingHoldTicks);
+        tag.putInt("attention", attention);
+        tag.putInt("pursuit_distance", pursuitDistance);
+        tag.putInt("last_pursuit_route_segment", lastPursuitRouteSegment);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
         return tag;
@@ -225,6 +249,62 @@ public final class CampaignSavedData extends SavedData {
         }
     }
 
+    public void registerGunfire() {
+        if (status != CampaignStatus.RUNNING) {
+            return;
+        }
+        attention = PursuitPolicy.afterGunfireAttention(attention);
+        pursuitDistance = PursuitPolicy.afterGunfirePursuit(pursuitDistance);
+        setDirty();
+    }
+
+    public void registerExplosion() {
+        if (status != CampaignStatus.RUNNING) {
+            return;
+        }
+        attention = PursuitPolicy.afterExplosionAttention(attention);
+        pursuitDistance = PursuitPolicy.afterExplosionPursuit(pursuitDistance);
+        setDirty();
+    }
+
+    private TickOutcome updatePursuitPressure() {
+        if (totalActiveTicks % PursuitPolicy.SAMPLE_INTERVAL_TICKS != 0L) {
+            return TickOutcome.NONE;
+        }
+
+        PursuitPolicy.Sample next = PursuitPolicy.sample(
+                attention,
+                pursuitDistance,
+                routeSegment,
+                lastPursuitRouteSegment,
+                day);
+        if (next.attention() != attention
+                || next.pursuitDistance() != pursuitDistance
+                || next.routeSegment() != lastPursuitRouteSegment) {
+            attention = next.attention();
+            pursuitDistance = next.pursuitDistance();
+            lastPursuitRouteSegment = next.routeSegment();
+            setDirty();
+        }
+
+        if (activeTicksIntoDay >= DEFAULT_ACTIVE_TICKS_PER_DAY
+                || !PursuitPolicy.shouldTriggerSiege(
+                        status,
+                        day,
+                        next.pursuitDistance(),
+                        activeMission != null)
+                || !createMission(MissionType.ZOMBIE_BLOCKADE)) {
+            return TickOutcome.NONE;
+        }
+
+        // The active blockade is the pressure valve. The abstract horde stays
+        // at zero distance until turn-in or fallback restores it; the active
+        // mission prevents a second siege while the first is unresolved.
+        lastPursuitRouteSegment = routeSegment;
+        setDirty();
+        return TickOutcome.SIEGE_TRIGGERED;
+    }
+
     public boolean start() {
         if (status != CampaignStatus.NOT_STARTED) {
             return false;
@@ -258,8 +338,11 @@ public final class CampaignSavedData extends SavedData {
         if ((totalActiveTicks % 200L) == 0L) {
             setDirty();
         }
+        TickOutcome pressureOutcome = updatePursuitPressure();
         if (activeTicksIntoDay < DEFAULT_ACTIVE_TICKS_PER_DAY) {
-            return TickOutcome.NONE;
+            return pressureOutcome != TickOutcome.NONE
+                    ? pressureOutcome
+                    : TickOutcome.NONE;
         }
 
         activeTicksIntoDay -= DEFAULT_ACTIVE_TICKS_PER_DAY;
@@ -396,6 +479,7 @@ public final class CampaignSavedData extends SavedData {
             return false;
         }
         boolean finale = isFinaleMission(activeMission);
+        MissionType completedType = activeMission.type();
         activeMission.complete();
         activeMission = null;
         if (finale) {
@@ -406,6 +490,11 @@ public final class CampaignSavedData extends SavedData {
             reconcileFinaleState();
         } else {
             threat = Math.max(0, threat - 2);
+            if (completedType == MissionType.ZOMBIE_BLOCKADE) {
+                pursuitDistance = Math.max(
+                        pursuitDistance,
+                        PursuitPolicy.PURSUIT_AFTER_SIEGE);
+            }
         }
         setDirty();
         return true;
@@ -429,8 +518,14 @@ public final class CampaignSavedData extends SavedData {
         if (activeMission == null || isFinaleMission(activeMission)) {
             return false;
         }
+        MissionType failedType = activeMission.type();
         activeMission = null;
         threat = Math.min(100, threat + Math.max(0, threatPenalty));
+        if (failedType == MissionType.ZOMBIE_BLOCKADE) {
+            pursuitDistance = Math.max(
+                    pursuitDistance,
+                    PursuitPolicy.PURSUIT_AFTER_SIEGE_FALLBACK);
+        }
         setDirty();
         return true;
     }
@@ -606,6 +701,18 @@ public final class CampaignSavedData extends SavedData {
         return effectivePlayers;
     }
 
+    public int attention() {
+        return attention;
+    }
+
+    public int pursuitDistance() {
+        return pursuitDistance;
+    }
+
+    public int lastPursuitRouteSegment() {
+        return lastPursuitRouteSegment;
+    }
+
     public ActiveMission activeMission() {
         return activeMission;
     }
@@ -653,6 +760,7 @@ public final class CampaignSavedData extends SavedData {
         DAY_ADVANCED_WITH_FINALE,
         FINALE_MISSION_STARTED,
         FINAL_DAY_ELAPSED,
+        SIEGE_TRIGGERED,
         CAMPAIGN_COMPLETED
     }
 }
