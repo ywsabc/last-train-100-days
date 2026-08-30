@@ -20,6 +20,7 @@ public final class MissionFallbackPolicy {
             case RAIL_BREAK -> 4;
             case STATION_POWER -> 5;
             case STATION_GATE -> 4;
+            case TRACK_CLEARANCE -> 4;
             case SUPPLY_RECOVERY -> 3;
             case ZOMBIE_BLOCKADE -> 5;
             case RESCUE_SURVIVOR -> OptionalMissionPolicy.RESCUE_GRACE_DAYS;

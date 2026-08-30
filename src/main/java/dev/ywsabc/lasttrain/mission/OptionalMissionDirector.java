@@ -31,10 +31,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * World-side director for optional missions: prepares and reconciles the
- * salvage car structure and the rescue survivor entity, observes objective
- * completion, executes the durable reward outbox and runs deferred site
- * cleanups once the site chunks load again.
+ * World-side director for optional missions and the shared reward outbox.
+ *
+ * <p>可选任务现场仍由本类准备与协调；奖励投递则服务所有任务类型，主线任务和
+ * 可选任务共用同一收据、箱子与重试规则。站点清理只处理本类拥有的可选现场。</p>
  */
 public final class OptionalMissionDirector {
     static final int UPDATE_ALL = 3;
@@ -447,7 +447,7 @@ public final class OptionalMissionDirector {
 
     private static void broadcastRewardDelivered(ServerLevel level) {
         level.getServer().getPlayerList().broadcastSystemMessage(
-                Component.translatable("message.lasttrain.optional_reward_delivered"),
+                Component.translatable("message.lasttrain.reward_delivered"),
                 false);
     }
 

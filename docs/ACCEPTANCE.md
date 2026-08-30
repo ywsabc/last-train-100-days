@@ -1,11 +1,32 @@
 # 规格与质量验收
 
-状态日期：2026-08-15。
+状态日期：2026-08-30。
 适用版本：`lasttrain 0.1.0-alpha.4` / Packwiz 包 `0.1.0-alpha.4`。
 依据文档：`docs/GAME_DESIGN.md`、`docs/TECHNICAL_ARCHITECTURE.md`、
 `docs/ROADMAP.md`、`docs/COMPATIBILITY.md`。
 
-## 1. 本轮 TDD 执行记录
+## 0. xhigh 重构一致性复核（2026-08-30）
+
+本节记录当前 `feat/xhigh-rebuild` 代码切片的静态审查与单元回归；下方 77 项记录
+保留为 2026-08-15 后方尸潮切片的历史证据，不再代表当前测试总数。
+
+| 设计/验收项 | 当前实现证据 | 结论 |
+| --- | --- | --- |
+| 五感染阶段效果进入真实数值路径 | `InfectionPolicy.Stage.effects()` 同时驱动最低关注度、停车追击消耗、尸群目标倍率和事件概率；`IntegrationBridge` 同步阶段；既有感染策略/存档测试 | PASS（纯策略/事件接线） |
+| 至少三类主线障碍 | 断轨、供电、站门、线路清障、尸群封锁均为真实世界目标；`TUNNEL` 关键任务改用 `TRACK_CLEARANCE`；清障布局/宽限/里程门测试 | PASS（代码世界适配器，仍需实机） |
+| 两类可选任务 | 搜救与车厢回收保持并行槽、接受/拒绝/超时/清理路径 | PASS（策略/存档/适配器测试） |
+| 主线奖励与重启恢复 | 主线交付先写 `PENDING` 收据再由共享 outbox 整批投递；补给回收使用现场桶，避免双发；保存重载与 payload 合法性测试 | PASS（纯策略/存档） |
+| 五阶段/任务/奖励语言键 | `TranslationKeys` 集中领域映射；测试验证 en_us/zh_cn 键集合相同且覆盖所有枚举值 | PASS（自动化资源契约） |
+| 无人在线暂停 | 事件层在 0 名非旁观者时暂停路线、主任务、可选任务、outbox 与清理世界副作用；`ServerActivityPolicyTest` | PASS（控制流/纯策略） |
+| 状态与存档诊断 | `/lasttrain status detail` 输出同 tick 不可变快照；`/lasttrain validate save` 和加载日志使用同一只读完整性策略 | PASS（纯策略/编译） |
+| 列车恢复 | 丢失/静止判定、代价、冷却、锚点钳制和 `SAFE_MODE` 已实现；`recover train` 仍只登记逻辑救援 | PARTIAL：物理归位/重建仍待后端与实机验收 |
+| 存档兼容 | 沿用 schema 11，新增任务使用现有枚举序列化和已有奖励收据结构，没有字段或 schema 迁移 | PASS（保存重载回归） |
+
+当前全量 JUnit 回归为 `385 passed / 0 failed / 0 errors / 0 skipped`；执行命令为
+`./gradlew cleanTest test --rerun-tasks --no-build-cache -q`。本轮遵守不启动游戏、
+不接受 EULA 的限制，因此世界内物理行为仍以第 5 节的未覆盖边界为准。
+
+## 1. 后方尸潮切片 TDD 历史记录（2026-08-15）
 
 本轮按红-绿-重构顺序开发“抽象后方尸潮”：
 

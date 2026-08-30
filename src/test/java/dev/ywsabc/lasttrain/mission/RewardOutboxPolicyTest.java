@@ -3,6 +3,7 @@ package dev.ywsabc.lasttrain.mission;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
@@ -16,6 +17,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
@@ -23,6 +25,16 @@ import net.minecraft.nbt.ListTag;
 import org.junit.jupiter.api.Test;
 
 class RewardOutboxPolicyTest {
+    @Test
+    void rewardItemsRejectBlankIdentityAtThePureBoundary() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> RewardItem.item("  ", 1));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RewardItem("minecraft:paper", 1, Optional.of("")));
+    }
+
     @Test
     void decisionTableDependsOnlyOnTheSavedData() {
         // The world side — marker, crate, items — never influences the

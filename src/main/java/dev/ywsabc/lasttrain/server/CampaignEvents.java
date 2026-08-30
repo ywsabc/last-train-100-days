@@ -1,11 +1,13 @@
 package dev.ywsabc.lasttrain.server;
 
 import dev.ywsabc.lasttrain.LastTrain;
+import dev.ywsabc.lasttrain.campaign.CampaignIntegrityPolicy;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.route.RouteDirector;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.Optional;
 import java.util.UUID;
 import net.minecraft.network.chat.Component;
@@ -36,14 +38,22 @@ public final class CampaignEvents {
                 data.status(),
                 data.day(),
                 data.routeSegment());
+        CampaignIntegrityPolicy.Report integrity = CampaignIntegrityPolicy.audit(data);
+        if (!integrity.issues().isEmpty()) {
+            // 加载时只报告跨字段矛盾，不擅自修复或删除玩家存档；管理员可用
+            // /lasttrain validate save 查看带本地化说明的完整列表。
+            LastTrain.LOGGER.warn(
+                    "Campaign save integrity check found {} error(s) and {} warning(s): {}",
+                    integrity.errors(),
+                    integrity.warnings(),
+                    integrity.issues());
+        }
     }
 
     public static void onServerTick(ServerTickEvent.Post event) {
         MinecraftServer server = event.getServer();
         CampaignSavedData data = CampaignSavedData.get(server);
         SimurailTrainBootstrap.tick(server.overworld(), data, server.getTickCount());
-        RouteDirector.tick(server, data, server.getTickCount());
-        MissionWorldDirector.tick(server, data, server.getTickCount());
 
         int activePlayers = (int) server.getPlayerList().getPlayers().stream()
                 .filter(player -> !player.isSpectator())
@@ -56,9 +66,15 @@ public final class CampaignEvents {
         data.observeCaptainOnline(captainOnline, logicalTick);
         data.expirePendingVote(logicalTick);
         observeTrainRecovery(server, data, activePlayers);
-        if (activePlayers == 0) {
+        if (!ServerActivityPolicy.shouldRunCampaignWorldDirectors(activePlayers)) {
             return;
         }
+
+        // 路线落块、任务实体、奖励箱与清理队列都属于世界副作用；无人在线时
+        // 整体暂停，避免专服空转期间悄悄改变现场。载具恢复探测仍在上方执行，
+        // 以便依赖丢失能及时进入 SAFE_MODE。
+        RouteDirector.tick(server, data, server.getTickCount());
+        MissionWorldDirector.tick(server, data, server.getTickCount());
 
         if (data.status() == CampaignStatus.NOT_STARTED) {
             UUID trainId = data.starterTrainSublevelId();
@@ -166,7 +182,7 @@ public final class CampaignEvents {
         }
         broadcast(server, Component.translatable(
                 "message.lasttrain.mission_generated",
-                Component.translatable("mission.lasttrain." + mission.type().serializedName()),
+                Component.translatable(TranslationKeys.mission(mission.type())),
                 mission.routeSegment()));
     }
 

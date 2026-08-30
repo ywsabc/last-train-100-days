@@ -17,6 +17,8 @@ public enum MissionType {
     RAIL_BREAK("rail_break", 3, Category.MAIN),
     STATION_POWER("station_power", 4, Category.MAIN),
     STATION_GATE("station_gate", 2, Category.MAIN),
+    /** 隧道坍塌或废车形成的真实净空障碍，可用工具或爆炸清除。 */
+    TRACK_CLEARANCE("track_clearance", 5, Category.MAIN),
     SUPPLY_RECOVERY("supply_recovery", 5, Category.SUPPORT),
     ZOMBIE_BLOCKADE("zombie_blockade", 12, Category.MAIN),
     RESCUE_SURVIVOR("rescue_survivor", 1, Category.OPTIONAL),
@@ -64,7 +66,10 @@ public enum MissionType {
     }
 
     public static Optional<MissionType> parse(String value) {
-        String normalized = value.toLowerCase(Locale.ROOT);
+        if (value == null || value.isBlank()) {
+            return Optional.empty();
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
         return Arrays.stream(values())
                 .filter(type -> type.serializedName.equals(normalized))
                 .findFirst();

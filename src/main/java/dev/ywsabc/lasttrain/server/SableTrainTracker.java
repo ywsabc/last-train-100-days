@@ -222,8 +222,8 @@ public final class SableTrainTracker {
             }
             CompoundTag tag = userData(subLevel);
             if (tag == null) {
-                // Sable 2.0.3 leaves newly assembled ServerSubLevel user data
-                // unset until the first caller supplies it.
+                // Sable 2.0.5 新装配的 ServerSubLevel 初始 user data 仍可能为空，
+                // 第一个写入方必须显式创建容器。
                 tag = new CompoundTag();
             }
             tag.putBoolean(STARTER_TAG, true);

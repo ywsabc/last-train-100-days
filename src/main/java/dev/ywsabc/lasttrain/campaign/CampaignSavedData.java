@@ -1400,11 +1400,20 @@ public final class CampaignSavedData extends SavedData {
             return false;
         }
         boolean finale = isFinaleMission(activeMission);
+        UUID completedId = activeMission.id();
         MissionType completedType = activeMission.type();
         activeMission.complete();
         activeMission = null;
         activeKeyMission = null;
         recordMissionOutcome(completedType, MissionPoolPolicy.Outcome.COMPLETED);
+        if (RewardOutboxPolicy.rewardedOnTurnIn(completedType)) {
+            // 先把一次性收据写进权威存档，再由世界适配器尝试整批投递；主线任务
+            // 因而也满足“继续前进所需资源 + 少量净收益”，且重启不会重复创建。
+            putRewardReceipt(new RewardReceipt(
+                    completedId,
+                    completedType,
+                    RewardOutboxPolicy.ReceiptState.PENDING));
+        }
         if (finale) {
             finaleMissionCompleted = true;
             // Command turn-in also runs on the logical server thread. Resolve

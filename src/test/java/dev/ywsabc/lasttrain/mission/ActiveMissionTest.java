@@ -2,9 +2,11 @@ package dev.ywsabc.lasttrain.mission;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.UUID;
+import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
 
 class ActiveMissionTest {
@@ -33,6 +35,9 @@ class ActiveMissionTest {
     @Test
     void serializedNamesAreStableAndCaseInsensitive() {
         assertEquals(MissionType.STATION_POWER, MissionType.parse("STATION_POWER").orElseThrow());
+        assertEquals(MissionType.TRACK_CLEARANCE, MissionType.parse("  TRACK_CLEARANCE  ").orElseThrow());
+        assertTrue(MissionType.parse(null).isEmpty());
+        assertTrue(MissionType.parse("  ").isEmpty());
         assertTrue(MissionType.parse("unknown").isEmpty());
     }
 
@@ -58,5 +63,38 @@ class ActiveMissionTest {
 
         assertEquals(id, mission.id());
         assertEquals(MissionType.ZOMBIE_BLOCKADE, mission.type());
+    }
+
+    @Test
+    void malformedPersistedBoundsAreNormalizedWithoutKeepingAPhantomPreparedSite() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("id", UUID.randomUUID().toString());
+        tag.putString("type", MissionType.TRACK_CLEARANCE.serializedName());
+        tag.putString("stage", MissionStage.ACTIVE.name());
+        tag.putInt("created_day", -4);
+        tag.putInt("route_segment", -9);
+        tag.putInt("progress", Integer.MAX_VALUE);
+        tag.putInt("target", 3);
+        tag.putBoolean("world_prepared", true);
+
+        ActiveMission mission = ActiveMission.load(tag, null);
+
+        assertEquals(1, mission.createdDay());
+        assertEquals(0, mission.routeSegment());
+        assertEquals(3, mission.progress());
+        assertEquals(MissionStage.READY_TO_TURN_IN, mission.stage());
+        assertFalse(mission.worldPrepared());
+        assertThrows(
+                NullPointerException.class,
+                () -> new ActiveMission(
+                        UUID.randomUUID(),
+                        MissionType.RAIL_BREAK,
+                        null,
+                        1,
+                        0,
+                        0,
+                        1,
+                        null,
+                        false));
     }
 }

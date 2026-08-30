@@ -6,6 +6,7 @@ import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteTrackStates;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -53,7 +54,7 @@ public final class MissionWorldDirector {
         int count = Math.max(1, target);
         int[] offsets = new int[count];
         return switch (type) {
-            case RAIL_BREAK, SUPPLY_RECOVERY -> {
+            case RAIL_BREAK, TRACK_CLEARANCE, SUPPLY_RECOVERY -> {
                 int first = -(count / 2);
                 for (int index = 0; index < count; index++) {
                     offsets[index] = first + index;
@@ -110,8 +111,7 @@ public final class MissionWorldDirector {
                 server.getPlayerList().broadcastSystemMessage(
                         Component.translatable(
                                 "message.lasttrain.mission_failed",
-                                Component.translatable(
-                                        "mission.lasttrain." + mission.type().serializedName()),
+                                Component.translatable(TranslationKeys.mission(mission.type())),
                                 data.threat()),
                         false);
             }
@@ -181,8 +181,7 @@ public final class MissionWorldDirector {
             server.getPlayerList().broadcastSystemMessage(
                     Component.translatable(
                             "message.lasttrain.mission_ready",
-                            Component.translatable(
-                                    "mission.lasttrain." + mission.type().serializedName())),
+                            Component.translatable(TranslationKeys.mission(mission.type()))),
                     false);
         }
     }
@@ -210,6 +209,7 @@ public final class MissionWorldDirector {
                 case RAIL_BREAK -> prepareRailBreak(level, mission);
                 case STATION_POWER -> prepareStationPower(level, mission);
                 case STATION_GATE -> prepareStationGate(level, mission);
+                case TRACK_CLEARANCE -> prepareTrackClearance(level, mission);
                 case SUPPLY_RECOVERY -> prepareSupplyRecovery(level, mission);
                 case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, mission);
                 case RESCUE_SURVIVOR, SALVAGE_CAR -> true;
@@ -229,6 +229,7 @@ public final class MissionWorldDirector {
             case RAIL_BREAK -> observeRailRepair(level, mission);
             case STATION_POWER -> observePoweredLevers(level, mission);
             case STATION_GATE -> observeOpenDoors(level, mission);
+            case TRACK_CLEARANCE -> observeTrackClearance(level, mission);
             case SUPPLY_RECOVERY -> observeRecoveredBarrels(level, mission);
             case ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> mission.progress();
         };
@@ -358,6 +359,22 @@ public final class MissionWorldDirector {
         return true;
     }
 
+    /**
+     * 将碎石放在轨道上方形成真实净空障碍。逐块工具拆除是低噪声解法；爆炸也能
+     * 清除，但会自然经过爆炸事件接线增加关注度与感染进度。底层轨道保持不变。
+     */
+    private static boolean prepareTrackClearance(ServerLevel level, ActiveMission mission) {
+        int index = 0;
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
+            Block debris = (index++ & 1) == 0 ? Blocks.COBBLESTONE : Blocks.GRAVEL;
+            level.setBlock(
+                    mission.site().offset(offset, 1, 0),
+                    debris.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+        return true;
+    }
+
     private static boolean prepareZombieBlockade(ServerLevel level, ActiveMission mission) {
         return reconcileZombieBlockade(level, mission);
     }
@@ -374,7 +391,8 @@ public final class MissionWorldDirector {
         }
         try {
             return switch (mission.type()) {
-                case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> true;
+                case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE,
+                        RESCUE_SURVIVOR, SALVAGE_CAR -> true;
                 case STATION_POWER -> {
                     repairStationPower(level, mission);
                     ensureRouteBarrier(level, mission.site());
@@ -588,6 +606,17 @@ public final class MissionWorldDirector {
         return recovered;
     }
 
+    /** 只有净空恢复为空气才计数；用其他方块替换碎石不会伪造完成。 */
+    private static int observeTrackClearance(ServerLevel level, ActiveMission mission) {
+        int cleared = 0;
+        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
+            if (level.getBlockState(mission.site().offset(offset, 1, 0)).isAir()) {
+                cleared++;
+            }
+        }
+        return cleared;
+    }
+
     private static boolean canClearFallbackWorld(ServerLevel level, ActiveMission mission) {
         if (!mission.worldPrepared() || mission.site() == null) {
             return true;
@@ -620,6 +649,15 @@ public final class MissionWorldDirector {
                 }
             }
             case STATION_POWER, STATION_GATE -> resolveRouteBarrier(level, mission);
+            case TRACK_CLEARANCE -> {
+                for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
+                    BlockPos debris = mission.site().offset(offset, 1, 0);
+                    BlockState state = level.getBlockState(debris);
+                    if (state.is(Blocks.COBBLESTONE) || state.is(Blocks.GRAVEL)) {
+                        level.setBlock(debris, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
+                    }
+                }
+            }
             case ZOMBIE_BLOCKADE -> {
                 String tag = missionEntityTag(mission);
                 for (net.minecraft.world.entity.Entity entity : level.getAllEntities()) {
@@ -761,7 +799,7 @@ public final class MissionWorldDirector {
                     && dz == 4
                     && containsObjectiveXOffset(offsets, dx);
             case SALVAGE_CAR -> OptionalMissionDirector.isProtectedSalvageBlock(mission, pos);
-            case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR -> false;
+            case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR -> false;
         };
     }
 
@@ -771,6 +809,7 @@ public final class MissionWorldDirector {
                 && mission.worldPrepared()
                 && mission.stage() == MissionStage.ACTIVE
                 && mission.type() != MissionType.RAIL_BREAK
+                && mission.type() != MissionType.TRACK_CLEARANCE
                 && mission.type() != MissionType.ZOMBIE_BLOCKADE
                 && mission.type() != MissionType.RESCUE_SURVIVOR;
     }
@@ -850,7 +889,7 @@ public final class MissionWorldDirector {
                     && containsObjectiveXOffset(offsets, dx)
                     ? RegeneratedMissionDrop.BARREL
                     : RegeneratedMissionDrop.NONE;
-            case RAIL_BREAK, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR ->
+            case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR ->
                     RegeneratedMissionDrop.NONE;
         };
     }

@@ -3,11 +3,11 @@ package dev.ywsabc.lasttrain.server;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.integration.TaczStarterKit;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -214,8 +214,7 @@ public final class PlayerEvents {
                 "message.lasttrain.personal_status",
                 data.day(),
                 CampaignSavedData.FINAL_DAY,
-                Component.translatable("campaign.lasttrain.status."
-                        + data.status().name().toLowerCase(Locale.ROOT)),
+                Component.translatable(TranslationKeys.campaignStatus(data.status())),
                 data.routeSegment(),
                 data.threat(),
                 data.attention(),
@@ -224,12 +223,11 @@ public final class PlayerEvents {
         if (mission != null) {
             player.sendSystemMessage(Component.translatable(
                     "message.lasttrain.personal_mission",
-                    Component.translatable("mission.lasttrain." + mission.type().serializedName()),
+                    Component.translatable(TranslationKeys.mission(mission.type())),
                     mission.progress(),
                     mission.target(),
                     mission.routeSegment(),
-                    Component.translatable("mission.lasttrain.stage."
-                            + mission.stage().name().toLowerCase(Locale.ROOT))));
+                    Component.translatable(TranslationKeys.missionStage(mission.stage()))));
         }
     }
 

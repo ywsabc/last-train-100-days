@@ -1,6 +1,7 @@
 package dev.ywsabc.lasttrain.mission;
 
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -46,8 +47,7 @@ public final class MissionEvents {
             server.getPlayerList().broadcastSystemMessage(
                     Component.translatable(
                             "message.lasttrain.mission_ready",
-                            Component.translatable(
-                                    "mission.lasttrain." + mission.type().serializedName())),
+                            Component.translatable(TranslationKeys.mission(mission.type()))),
                     false);
         }
     }

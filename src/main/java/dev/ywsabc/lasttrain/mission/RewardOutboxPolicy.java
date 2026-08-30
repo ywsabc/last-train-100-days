@@ -8,7 +8,7 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Durable reward outbox policy for optional missions.
+ * Durable reward outbox policy for mission completion rewards.
  *
  * <p>The persisted saved data is the sole authority over reward delivery.
  * The decision table is deliberately simple:</p>
@@ -90,9 +90,15 @@ public final class RewardOutboxPolicy {
         public RewardItem {
             Objects.requireNonNull(itemId, "itemId");
             Objects.requireNonNull(credentialMissionId, "credentialMissionId");
+            if (itemId.isBlank()) {
+                throw new IllegalArgumentException("Reward item id must not be blank");
+            }
             if (count <= 0 || count > 64) {
                 throw new IllegalArgumentException(
                         "Reward counts must be within 1..64: " + count);
+            }
+            if (credentialMissionId.filter(String::isBlank).isPresent()) {
+                throw new IllegalArgumentException("Credential mission id must not be blank");
             }
         }
 
@@ -156,7 +162,7 @@ public final class RewardOutboxPolicy {
     }
 
     /**
-     * The reward payload of an optional mission type. Every entry respects
+     * The reward payload of a mission type. Every entry respects
      * the 1..64 sanity window; the world adapter additionally rejects any
      * stack above its live item stack limit, so an illegal stack such as a
      * count-10 minecart can never reach a container.
@@ -165,6 +171,25 @@ public final class RewardOutboxPolicy {
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(missionId, "missionId");
         return switch (type) {
+            case RAIL_BREAK -> List.of(
+                    RewardItem.item("minecraft:iron_ingot", 6),
+                    RewardItem.item("minecraft:rail", 8),
+                    RewardItem.item("minecraft:redstone", 4));
+            case STATION_POWER -> List.of(
+                    RewardItem.item("minecraft:redstone", 8),
+                    RewardItem.item("minecraft:charcoal", 8),
+                    RewardItem.item("minecraft:iron_ingot", 4));
+            case STATION_GATE -> List.of(
+                    RewardItem.item("minecraft:iron_ingot", 6),
+                    RewardItem.item("minecraft:bread", 6));
+            case TRACK_CLEARANCE -> List.of(
+                    RewardItem.item("minecraft:iron_ingot", 4),
+                    RewardItem.item("minecraft:coal", 8),
+                    RewardItem.item("minecraft:torch", 12));
+            case ZOMBIE_BLOCKADE -> List.of(
+                    RewardItem.item("minecraft:arrow", 16),
+                    RewardItem.item("minecraft:bread", 8),
+                    RewardItem.item("minecraft:iron_ingot", 4));
             case RESCUE_SURVIVOR -> List.of(
                     RewardItem.item("minecraft:bread", 8),
                     RewardItem.item("minecraft:baked_potato", 8),
@@ -175,8 +200,14 @@ public final class RewardOutboxPolicy {
                     RewardItem.credential(missionId),
                     RewardItem.item("minecraft:iron_ingot", 4),
                     RewardItem.item("minecraft:redstone", 8));
-            default -> throw new IllegalArgumentException(type + " has no optional reward");
+            case SUPPLY_RECOVERY -> throw new IllegalArgumentException(
+                    "Supply recovery pays through its mission barrels, not the outbox");
         };
+    }
+
+    /** 完成时进入 outbox 的任务；补给回收的现场容器本身就是奖励。 */
+    public static boolean rewardedOnTurnIn(MissionType type) {
+        return Objects.requireNonNull(type, "type") != MissionType.SUPPLY_RECOVERY;
     }
 
     /** Sanity window check; stack-limit enforcement happens at the adapter. */

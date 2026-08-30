@@ -7,6 +7,7 @@ import dev.ywsabc.lasttrain.integration.TongDaTrackBridge;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.core.BlockPos;
@@ -626,8 +627,7 @@ public final class RouteDirector {
         server.getPlayerList().broadcastSystemMessage(
                 Component.translatable(
                         "message.lasttrain.mission_generated",
-                        Component.translatable(
-                                "mission.lasttrain." + mission.type().serializedName()),
+                        Component.translatable(TranslationKeys.mission(mission.type())),
                         mission.routeSegment()),
                 false);
     }

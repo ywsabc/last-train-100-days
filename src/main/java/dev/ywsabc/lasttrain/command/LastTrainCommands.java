@@ -5,10 +5,10 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignDiagnostics;
+import dev.ywsabc.lasttrain.campaign.CampaignIntegrityPolicy;
 import dev.ywsabc.lasttrain.campaign.CampaignMode;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
-import dev.ywsabc.lasttrain.campaign.InfectionPolicy;
-import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
 import dev.ywsabc.lasttrain.campaign.TeamPermissionPolicy;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
 import dev.ywsabc.lasttrain.mission.MissionBriefing;
@@ -18,8 +18,8 @@ import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.MissionWorldDirector;
 import dev.ywsabc.lasttrain.server.IntegrationBridge;
+import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.Arrays;
-import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
@@ -40,7 +40,13 @@ public final class LastTrainCommands {
     private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("lasttrain")
                 .then(Commands.literal("status")
-                        .executes(LastTrainCommands::status))
+                        .executes(LastTrainCommands::status)
+                        .then(Commands.literal("detail")
+                                .executes(LastTrainCommands::detailedStatus)))
+                .then(Commands.literal("validate")
+                        .requires(source -> source.hasPermission(2))
+                        .then(Commands.literal("save")
+                                .executes(LastTrainCommands::validateSave)))
                 .then(Commands.literal("mode")
                         .then(Commands.literal("endless")
                                 .executes(LastTrainCommands::enableEndlessMode)))
@@ -155,44 +161,131 @@ public final class LastTrainCommands {
 
     private static int status(CommandContext<CommandSourceStack> context) {
         CampaignSavedData data = data(context);
-        int onlinePlayers = (int) context.getSource().getServer().getPlayerList()
-                .getPlayers().stream()
-                .filter(player -> !player.isSpectator())
-                .count();
+        CampaignDiagnostics diagnostics = diagnostics(context, data);
         context.getSource().sendSuccess(
-                () -> statusMessage(data, onlinePlayers),
+                () -> statusMessage(diagnostics),
                 false);
         return data.day();
     }
 
     static String modeTranslationKey(CampaignMode mode) {
         CampaignMode safeMode = mode == null ? CampaignMode.STORY_100_DAYS : mode;
-        return "campaign.lasttrain.mode." + safeMode.serializedName();
+        return TranslationKeys.campaignMode(safeMode);
     }
 
-    private static Component statusMessage(CampaignSavedData data, int onlinePlayers) {
-        PursuitPolicy.AttentionLevel attentionLevel =
-                PursuitPolicy.attentionLevel(data.attention());
-        InfectionPolicy.Sample infection = data.infectionSample();
+    private static Component statusMessage(CampaignDiagnostics diagnostics) {
         return Component.translatable(
                 "command.lasttrain.status",
-                data.day(),
-                data.mode() == CampaignMode.ENDLESS ? "∞" : CampaignSavedData.FINAL_DAY,
-                Component.translatable(modeTranslationKey(data.mode())),
-                data.status().name(),
-                data.routeSegment(),
-                data.threat(),
-                infection.stageIndex(),
+                diagnostics.day(),
+                diagnostics.mode() == CampaignMode.ENDLESS ? "∞" : CampaignSavedData.FINAL_DAY,
+                Component.translatable(modeTranslationKey(diagnostics.mode())),
+                Component.translatable(TranslationKeys.campaignStatus(diagnostics.status())),
+                diagnostics.routeSegment(),
+                diagnostics.threat(),
+                diagnostics.infectionStage().index(),
                 Component.translatable(
-                        "infection.lasttrain.stage."
-                                + infection.stage().serializedName()),
-                data.effectivePlayers(),
-                onlinePlayers,
-                data.attention(),
-                Component.translatable(
-                        "attention.lasttrain."
-                                + attentionLevel.name().toLowerCase(Locale.ROOT)),
-                data.pursuitDistance());
+                        TranslationKeys.infectionStage(diagnostics.infectionStage())),
+                diagnostics.effectivePlayers(),
+                diagnostics.onlinePlayers(),
+                diagnostics.attention(),
+                Component.translatable(TranslationKeys.attention(diagnostics.attentionLevel())),
+                diagnostics.pursuitDistance());
+    }
+
+    /** 多行统计视图保持只读；先采样一次，避免输出跨 tick 的混合状态。 */
+    private static int detailedStatus(CommandContext<CommandSourceStack> context) {
+        CampaignSavedData data = data(context);
+        CampaignDiagnostics diagnostics = diagnostics(context, data);
+        context.getSource().sendSuccess(() -> statusMessage(diagnostics), false);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.status.detail.clock",
+                        diagnostics.activeTicksIntoDay(),
+                        CampaignSavedData.DEFAULT_ACTIVE_TICKS_PER_DAY,
+                        diagnostics.totalActiveTicks()),
+                false);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.status.detail.route",
+                        diagnostics.routeSegment(),
+                        diagnostics.expectedRouteSegment(),
+                        diagnostics.routeDeltaFromExpected(),
+                        diagnostics.generatedRouteSegment(),
+                        diagnostics.generatedLead(),
+                        diagnostics.plannedRouteSegments(),
+                        Component.translatable(TranslationKeys.pace(diagnostics.pace()))),
+                false);
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.status.detail.missions",
+                        diagnostics.activeMission().isPresent() ? 1 : 0,
+                        diagnostics.optionalMissions(),
+                        diagnostics.proposalPending() ? 1 : 0,
+                        diagnostics.pendingRewards(),
+                        diagnostics.claimedRewards(),
+                        diagnostics.pendingCleanups()),
+                false);
+        diagnostics.activeMission().ifPresent(mission -> context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.status.detail.active_mission",
+                        Component.translatable(TranslationKeys.mission(mission.type())),
+                        mission.id(),
+                        Component.translatable(TranslationKeys.missionStage(mission.stage())),
+                        mission.progress(),
+                        mission.target(),
+                        mission.routeSegment()),
+                false));
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.status.detail.recovery",
+                        Component.translatable(TranslationKeys.booleanValue(
+                                diagnostics.starterTrainAssembled())),
+                        Component.translatable(TranslationKeys.booleanValue(
+                                diagnostics.starterTrainIdentityPresent())),
+                        diagnostics.trainMissingTicks(),
+                        diagnostics.trainImmobileTicks(),
+                        diagnostics.rescueCount(),
+                        diagnostics.rescueAnchorSegment()),
+                false);
+        sendIntegrityReport(context, CampaignIntegrityPolicy.audit(data));
+        return diagnostics.day();
+    }
+
+    private static int validateSave(CommandContext<CommandSourceStack> context) {
+        CampaignIntegrityPolicy.Report report = CampaignIntegrityPolicy.audit(data(context));
+        sendIntegrityReport(context, report);
+        return report.healthy() ? 1 : 0;
+    }
+
+    private static void sendIntegrityReport(
+            CommandContext<CommandSourceStack> context,
+            CampaignIntegrityPolicy.Report report) {
+        context.getSource().sendSuccess(
+                () -> Component.translatable(
+                        "command.lasttrain.validate.summary",
+                        report.errors(),
+                        report.warnings()),
+                false);
+        for (CampaignIntegrityPolicy.Issue issue : report.issues()) {
+            context.getSource().sendSuccess(
+                    () -> Component.translatable(
+                            "command.lasttrain.validate.issue",
+                            Component.translatable(
+                                    TranslationKeys.integritySeverity(issue.severity())),
+                            Component.translatable(TranslationKeys.integrity(issue.code())),
+                            issue.detail()),
+                    false);
+        }
+    }
+
+    private static CampaignDiagnostics diagnostics(
+            CommandContext<CommandSourceStack> context,
+            CampaignSavedData data) {
+        int onlinePlayers = (int) context.getSource().getServer().getPlayerList()
+                .getPlayers().stream()
+                .filter(player -> !player.isSpectator())
+                .count();
+        return CampaignDiagnostics.snapshot(data, onlinePlayers);
     }
 
     private static int enableEndlessMode(CommandContext<CommandSourceStack> context) {
@@ -474,7 +567,7 @@ public final class LastTrainCommands {
         ServerPlayer target = findOnlinePlayer(
                 context.getSource().getServer(),
                 rawTarget);
-        UUID targetId = target == null ? parseId(context, rawTarget) : target.getUUID();
+        UUID targetId = target == null ? parseId(rawTarget) : target.getUUID();
         if (targetId == null
                 || !data.isTeamMember(targetId)
                 || target != null && target.isSpectator()) {
@@ -643,7 +736,7 @@ public final class LastTrainCommands {
         }
         TeamPermissionPolicy.Decision decision = TeamPermissionPolicy.decide(
                 operation,
-                teamRequester(context, requester, data),
+                teamRequester(context, requester),
                 teamState(context.getSource().getServer(), data),
                 TeamPermissionPolicy.Config.defaults());
         if (decision == TeamPermissionPolicy.Decision.ALLOW) {
@@ -723,7 +816,7 @@ public final class LastTrainCommands {
                     Component.translatable("command.lasttrain.mission.requires_team_member"));
             return 0;
         }
-        UUID givenId = parseId(context, rawId);
+        UUID givenId = parseId(rawId);
         if (rawId != null && givenId == null) {
             context.getSource().sendFailure(
                     Component.translatable("command.lasttrain.mission.invalid_id"));
@@ -733,7 +826,7 @@ public final class LastTrainCommands {
         ActiveMission proposal = data.proposedMission();
         Component missionName = proposal == null
                 ? Component.translatable("command.lasttrain.mission.none")
-                : Component.translatable("mission.lasttrain." + proposal.type().serializedName());
+                : Component.translatable(TranslationKeys.mission(proposal.type()));
         CampaignSavedData.ProposalAnswer result =
                 accept ? data.acceptProposal(givenId, revision) : data.rejectProposal(givenId, revision);
         switch (result) {
@@ -785,7 +878,7 @@ public final class LastTrainCommands {
                     Component.translatable("command.lasttrain.mission.requires_captain"));
             return 0;
         }
-        UUID givenId = parseId(context, rawId);
+        UUID givenId = parseId(rawId);
         if (rawId != null && givenId == null) {
             context.getSource().sendFailure(
                     Component.translatable("command.lasttrain.mission.invalid_id"));
@@ -820,8 +913,7 @@ public final class LastTrainCommands {
     private static Component skipTargetName(CampaignSavedData data, UUID givenId) {
         if (givenId != null) {
             return data.optionalMission(givenId)
-                    .map(mission -> Component.translatable(
-                            "mission.lasttrain." + mission.type().serializedName()))
+                    .map(mission -> Component.translatable(TranslationKeys.mission(mission.type())))
                     .orElse(null);
         }
         java.util.List<ActiveMission> skippable = data.optionalMissions().stream()
@@ -832,7 +924,7 @@ public final class LastTrainCommands {
             return null;
         }
         return Component.translatable(
-                "mission.lasttrain." + skippable.get(0).type().serializedName());
+                TranslationKeys.mission(skippable.get(0).type()));
     }
 
     private static ServerPlayer player(CommandContext<CommandSourceStack> context) {
@@ -847,8 +939,7 @@ public final class LastTrainCommands {
 
     private static TeamPermissionPolicy.Requester teamRequester(
             CommandContext<CommandSourceStack> context,
-            ServerPlayer player,
-            CampaignSavedData data) {
+            ServerPlayer player) {
         return new TeamPermissionPolicy.Requester(
                 player.getUUID(),
                 true,
@@ -883,12 +974,12 @@ public final class LastTrainCommands {
                 data.isCaptain(player.getUUID()));
     }
 
-    private static UUID parseId(CommandContext<CommandSourceStack> context, String rawId) {
-        if (rawId == null) {
+    private static UUID parseId(String rawId) {
+        if (rawId == null || rawId.isBlank()) {
             return null;
         }
         try {
-            return UUID.fromString(rawId);
+            return UUID.fromString(rawId.trim());
         } catch (IllegalArgumentException ignored) {
             return null;
         }
@@ -940,12 +1031,11 @@ public final class LastTrainCommands {
     private static Component missionSummary(ActiveMission mission) {
         return Component.translatable(
                 "command.lasttrain.mission.status",
-                Component.translatable("mission.lasttrain." + mission.type().serializedName()),
+                Component.translatable(TranslationKeys.mission(mission.type())),
                 mission.progress(),
                 mission.target(),
                 mission.routeSegment(),
-                Component.translatable("mission.lasttrain.stage."
-                        + mission.stage().name().toLowerCase(Locale.ROOT)));
+                Component.translatable(TranslationKeys.missionStage(mission.stage())));
     }
 
     /** Pre-acceptance briefing: type, risk, reward category and time limit. */
@@ -953,18 +1043,16 @@ public final class LastTrainCommands {
         MissionBriefing briefing = MissionBriefing.of(proposal.type()).orElse(null);
         Component risk = briefing == null
                 ? Component.translatable("briefing.lasttrain.risk.none")
-                : Component.translatable(
-                        "briefing.lasttrain.risk." + briefing.risk().name().toLowerCase(Locale.ROOT));
+                : Component.translatable(TranslationKeys.briefingRisk(briefing.risk()));
         Component reward = briefing == null
                 ? Component.translatable("briefing.lasttrain.reward.none")
-                : Component.translatable(
-                        "briefing.lasttrain.reward." + briefing.reward().name().toLowerCase(Locale.ROOT));
+                : Component.translatable(TranslationKeys.briefingReward(briefing.reward()));
         Component timed = briefing == null
                 ? Component.translatable("briefing.lasttrain.timed.none")
                 : Component.translatable("briefing.lasttrain.timed.days", briefing.timedDays());
         return Component.translatable(
                 "command.lasttrain.mission.proposal",
-                Component.translatable("mission.lasttrain." + proposal.type().serializedName()),
+                Component.translatable(TranslationKeys.mission(proposal.type())),
                 proposal.id(),
                 proposal.revision(),
                 proposal.routeSegment(),

@@ -51,14 +51,16 @@ public final class ActiveMission {
             long deadlineTick) {
         this.id = Objects.requireNonNull(id, "id");
         this.type = Objects.requireNonNull(type, "type");
-        this.stage = stage;
+        this.stage = Objects.requireNonNull(stage, "stage");
         this.revision = Math.max(0, revision);
-        this.createdDay = createdDay;
-        this.routeSegment = routeSegment;
-        this.progress = Math.max(0, progress);
+        this.createdDay = Math.max(1, createdDay);
+        this.routeSegment = Math.max(0, routeSegment);
         this.target = Math.clamp(Math.max(1, target), 1, MAX_TARGET);
-        this.site = site;
-        this.worldPrepared = worldPrepared;
+        this.progress = Math.clamp(progress, 0, this.target);
+        this.site = site == null ? null : site.immutable();
+        // 没有稳定现场坐标就不能声称世界准备完成；旧档异常组合会在下一 tick
+        // 重新分配现场并走幂等准备，而不是直接观察空气后误判完成。
+        this.worldPrepared = worldPrepared && this.site != null;
         this.createdTick = Math.max(0L, createdTick);
         this.deadlineTick = Math.max(this.createdTick, deadlineTick);
         normalizeStage();

@@ -21,7 +21,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.fml.ModList;
 
 /**
- * Narrow optional bridge to TongDa Railway 1.1.3's track-spawner API.
+ * Narrow optional bridge to TongDa Railway 1.1.5's track-spawner API.
  *
  * <p>The bridge queues straight track runs of any horizontal direction and
  * length by placing {@code tongdarailway:track_spawner}, creating each
@@ -542,7 +542,7 @@ public final class TongDaTrackBridge {
                         || !Modifier.isStatic(enabled.getModifiers())
                         || enabled.getType() != boolean.class) {
                     throw new NoSuchMethodException(
-                            "TongDa 1.1.3 track-spawner signatures do not match");
+                            "TongDa 1.1.5 track-spawner signatures do not match");
                 }
                 return new ApiResolution(
                         new TongDaApi(blockEntityType, factory, shape, add, enabled),

@@ -175,7 +175,11 @@ public final class CampaignPacingPolicy {
             int day,
             int routeSegment,
             RouteProgressPolicy.MileageLine mileageLine) {
-        return switch (pace(day, routeSegment, mileageLine).pace()) {
+        return weightsFor(pace(day, routeSegment, mileageLine).pace());
+    }
+
+    private static MissionWeights weightsFor(RouteProgressPolicy.Pace pace) {
+        return switch (Objects.requireNonNull(pace, "pace")) {
             case BEHIND -> new MissionWeights(
                     25,
                     140,
@@ -206,11 +210,7 @@ public final class CampaignPacingPolicy {
             int day,
             int routeSegment,
             RouteProgressPolicy.MileageLine mileageLine) {
-        return switch (pace(mode, day, routeSegment, mileageLine).pace()) {
-            case BEHIND -> new MissionWeights(25, 140, 35, 100);
-            case ON_TRACK -> new MissionWeights(80, 55, 70, 100);
-            case AHEAD -> new MissionWeights(80, 55, 150, 100);
-        };
+        return weightsFor(pace(mode, day, routeSegment, mileageLine).pace());
     }
 
     /**
@@ -224,7 +224,12 @@ public final class CampaignPacingPolicy {
             int day,
             int routeSegment) {
         Objects.requireNonNull(random, "random");
-        MissionWeights weights = missionWeights(day, routeSegment);
+        return selectMissionType(random, missionWeights(day, routeSegment));
+    }
+
+    private static MissionType selectMissionType(
+            SplittableRandom random,
+            MissionWeights weights) {
         int lowValueWeight = weights.lowValueForcedObstacleWeight();
         int supplyWeight = weights.fuelSupplyGuaranteeWeight();
         int total = lowValueWeight + supplyWeight;
@@ -248,22 +253,7 @@ public final class CampaignPacingPolicy {
             int day,
             int routeSegment) {
         Objects.requireNonNull(random, "random");
-        MissionWeights weights = missionWeights(mode, day, routeSegment);
-        int lowValueWeight = weights.lowValueForcedObstacleWeight();
-        int supplyWeight = weights.fuelSupplyGuaranteeWeight();
-        int total = lowValueWeight + supplyWeight;
-        if (total <= 0) {
-            return MissionType.SUPPLY_RECOVERY;
-        }
-        int roll = random.nextInt(total);
-        if (roll >= lowValueWeight) {
-            return MissionType.SUPPLY_RECOVERY;
-        }
-        return switch (roll % 3) {
-            case 0 -> MissionType.RAIL_BREAK;
-            case 1 -> MissionType.STATION_POWER;
-            default -> MissionType.STATION_GATE;
-        };
+        return selectMissionType(random, missionWeights(mode, day, routeSegment));
     }
 
     public enum Chapter {
@@ -300,7 +290,7 @@ public final class CampaignPacingPolicy {
     public enum KeyMission {
         PROLOGUE_DEPARTURE(Chapter.PROLOGUE, 1, MissionType.RAIL_BREAK),
         FIRST_CITY_STATION(Chapter.SCARCITY, 8, MissionType.STATION_GATE),
-        TUNNEL(Chapter.SPREAD, 24, MissionType.RAIL_BREAK),
+        TUNNEL(Chapter.SPREAD, 24, MissionType.TRACK_CLEARANCE),
         COMPOUND_LOCATION(Chapter.COLLAPSE, 40, MissionType.STATION_POWER),
         FINALE_HUB_CLUE(Chapter.FINAL_LEG, 56, MissionType.SUPPLY_RECOVERY);
 

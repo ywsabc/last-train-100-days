@@ -89,7 +89,7 @@ Minecraft 单人世界本身也运行逻辑服务器。三种玩法只在服务�
   派生种子规划逻辑区段（rules version 2 起；version 1 为历史草案，用
   SplittableRandom 且不混入配置字段）。
 - 保证主线路径有且只有一个可继续前进的出口；支线不得替代主线出口。
-- 锁定 TongDa 1.1.3 的公开 Track Spawner 表面实现区段轨道，逐格验证真实
+- 锁定 TongDa 1.1.5 的公开 Track Spawner 表面实现区段轨道，逐格验证真实
   Create `XO` 轨道后才提交持久化进度。物理轨形由承诺计划驱动：纯计算层
   `RouteSegmentLayout` 输出每段的主轨方向向量、拐点列表和支线轨道段列表，
   主线按该数据逐格铺设（当前所有模板均为东向直线），车站模板附带平行站台
@@ -439,7 +439,7 @@ interface TrackAdapter {
 
 不应在核心模块中通过 Mixin 或反射修改 TongDa 私有生成器。版本不匹配时应停用该集成并给出诊断，而不是带着未知行为写入存档。
 
-当前原型已固定到 TongDa Railway `1.1.3+mc21.1`，并由
+当前原型已固定到 TongDa Railway `1.1.5+mc21.1`，并由
 `TongDaTrackBridge` 使用其公开的 `TrackPutInfo.getByDir` 与
 `TrackSpawnerBlockEntity.addTrackPutInfo` 方法。适配器每次提交 64 个东向
 `XO` 指令；“生成器已排队”只代表待处理，只有相关区块全部加载且 64 个位置均为
@@ -612,12 +612,15 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 - 公共奖励进入有稳定 ID 的队伍补给箱，写入一次性凭据。
 - 个人奖励按玩家 UUID 保存领取凭据。
 - 背包满时不丢在地上，保留 `REWARD_PENDING` 或发送到补给箱。
-- 崩溃重试时先检查凭据及目标容器的奖励批次标记，避免复制。
-- 已实现：补给箱按任务保存每任务操作标记；`CLAIM_ONLY` 只翻转收据、绝不补货，
-  补货只发生在世界标记缺失的 `GRANT_AND_CLAIM` 路径；补货按每类物品
-  `目标量 − 箱中已有量` 的差额进行，`addStack` 返回实际放入数量，净新增为 0
-  （箱中本已有足量同类物品）时既不写标记也不置 CLAIMED，收据保持 PENDING 等待
-  可发放条件——绝不出现“无净新增却 CLAIMED”。
+- 崩溃重试以存档收据为唯一权威：`PENDING` 每 tick 尝试一次整批原子投递，
+  `CLAIMED` 永久不再投递；箱中操作标记只用于诊断，不能压制一张仍为
+  `PENDING` 的收据。
+- 已实现：每个任务 UUID 最多一张收据；箱子必须能完整容纳本次任务的整个 payload
+  才写入物品和操作标记，再把收据翻转为 `CLAIMED`。箱满、区块未加载或写入失败
+  均保持 `PENDING`，不会留下半份奖励。若箱子区块在收据变为 `CLAIMED` 后回滚，
+  选择“可丢失但不复制”的一致性边界，不会根据箱中物品或标记重新发放。
+- 主线任务与可选任务共用该 outbox；补给回收例外，其现场任务桶本身就是奖励，
+  不再额外创建一份 outbox 物资。
 
 ## 11. 玩家人数缩放
 
@@ -690,15 +693,17 @@ ACTIVE → FAILED_RECOVERABLE → ACTIVE
 重生玩家会统一等待 Sable 跟踪，尝试 3×3 甲板的九个安全槽位，超时后在初始站
 附近搜索安全落点；尚无协议检查、原位置验证、最近激活站或进度追赶包。
 
-当前原型无人在线时仅保证：
+当前原型无人在线时保证：
 
 - `CampaignSavedData` 的百日计时不推进；
-- The Hordes 依照整合包的 `pauseEventServer = true` 暂停共享尸潮。
+- The Hordes 依照整合包的 `pauseEventServer = true` 暂停共享尸潮；
+- `RouteDirector` 与 `MissionWorldDirector`（含可选任务、奖励 outbox、延迟清理）
+  在事件接线层整体暂停，不再生成线路、协调任务实体或改写任务现场。
 
-`SimurailTrainBootstrap`、`RouteDirector` 和 `MissionWorldDirector` 目前仍在
-服务端 tick；已准备的尸群任务可能继续协调实体，Sable 的持久强加载票据也不会
-自动释放。无人在线时紧急停车、暂停全部任务世界副作用、释放非必要票据，以及
-允许管理员选择继续运行，都是待实现并待联机验收的目标行为。
+`SimurailTrainBootstrap` 与列车恢复探测仍会运行，以便物理后端丢失时及时进入
+`SAFE_MODE`；Sable 的持久强加载票据仍不会自动释放。无人在线时让物理列车紧急
+停车、释放非必要票据，以及允许管理员选择继续运行，仍是待实现并待联机验收的
+目标行为。
 
 ## 13. 区块加载与性能
 
@@ -1025,8 +1030,12 @@ version 1 历史分支（SplittableRandom + 种子不含配置字段），输出
    方向/拐点铺设、车站站台与平行侧线、桥隧支撑、城市支线轨道段），旧存档无
    承诺计划时保持历史直线生产（LEGACY_LINEAR）、显式迁移后才走多模板规划，
    新战役使用版本 2；
-5. 断轨、供电、站门、补给回收和尸群清理五种代码定义的任务现场；
-6. `/lasttrain status`、战役推进和任务管理命令；
+5. 断轨、供电、站门、线路清障、补给回收和尸群清理六种代码定义的主槽任务现场，
+   外加搜救与车厢回收两种并行可选任务；章节关键任务 `TUNNEL` 使用真实清障目标，
+   不再借用断轨任务；
+6. `/lasttrain status`、只读多行 `/lasttrain status detail`、管理员存档自检
+   `/lasttrain validate save`、战役推进和任务管理命令；加载存档时也执行同一纯策略
+   审计并只记录问题，不自动删改存档；
 7. 1–6 人有效队伍数滑窗和按创建时人数冻结的任务目标缩放；材料型目标按
    1+0.55×(P-1)（上限 3.75）扩展现场，尸群预算按 1+0.70×(P-1)（上限 4.50）
    计算，并将有效人数同步为 In Control 的 `lasttrain_players`；
@@ -1049,6 +1058,11 @@ version 1 历史分支（SplittableRandom + 种子不含配置字段），输出
 14. 开发环境门禁：`FastForwardMode.enable` 与 `FaultInjection.register` 在无
     `-Dlasttrain.devTools=true` 启动参数时直接拒绝，生产路径成本为极低固定开销
     （单次 volatile 读），不再是零开销口径。
+15. 五感染阶段已经完整接入实际数值路径：阶段最低关注度、停车追击消耗、尸群目标
+    倍率、普通事件概率和 In Control 的 `lasttrain_infection_stage` 同步均读取同一
+    `InfectionPolicy.Stage.effects()`；阶段 0 保持原装配数值。
+16. 主线完成奖励与可选任务共用持久 outbox；补给回收保留现场桶奖励，避免双发。
+    领域枚举到语言键由 `TranslationKeys` 集中映射，中英文资源集合由测试保持对称。
 
 该切片已经覆盖构建、依赖固定、安装安全和纯状态策略；尚未验证进入真实世界后的
 列车装配/行驶、Create 轨道图拓扑、单人/LAN/多人重连、长期存档或百日完整流程，
