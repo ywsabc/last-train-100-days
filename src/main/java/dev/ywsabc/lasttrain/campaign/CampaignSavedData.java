@@ -123,6 +123,9 @@ public final class CampaignSavedData extends SavedData {
     private int attention = PursuitPolicy.INITIAL_ATTENTION;
     private int pursuitDistance = PursuitPolicy.INITIAL_PURSUIT_DISTANCE;
     private int lastPursuitRouteSegment;
+    /** Schema 11：只按有效在线 tick 与关键事件单调推进，不由 day 反算。 */
+    private int infectionStage = InfectionPolicy.MIN_STAGE;
+    private long infectionTicks;
     private ActiveMission proposedMission;
     private final List<ActiveMission> optionalMissions = new ArrayList<>();
     private final Map<UUID, RewardReceipt> rewardReceipts = new LinkedHashMap<>();
@@ -237,6 +240,17 @@ public final class CampaignSavedData extends SavedData {
                         0,
                         MAX_ROUTE_SEGMENT)
                 : data.routeSegment;
+        // Schema 11 缺省必须保持阶段 0 / tick 0。尤其不能拿旧档的 day 或
+        // total_active_ticks 回填，否则迁移会静默改变既有战役难度。
+        data.infectionStage = tag.contains("infection_stage")
+                ? Math.clamp(
+                        tag.getInt("infection_stage"),
+                        InfectionPolicy.MIN_STAGE,
+                        InfectionPolicy.MAX_STAGE)
+                : InfectionPolicy.MIN_STAGE;
+        data.infectionTicks = tag.contains("infection_ticks")
+                ? Math.max(0L, tag.getLong("infection_ticks"))
+                : 0L;
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         loadOptionalState(tag, registries, data);
@@ -291,6 +305,8 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("attention", attention);
         tag.putInt("pursuit_distance", pursuitDistance);
         tag.putInt("last_pursuit_route_segment", lastPursuitRouteSegment);
+        tag.putInt("infection_stage", infectionStage);
+        tag.putLong("infection_ticks", infectionTicks);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
         saveOptionalState(tag, registries);
@@ -900,21 +916,76 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public void registerGunfire() {
-        if (status != CampaignStatus.RUNNING) {
+        registerGunfire(true);
+    }
+
+    /** 事件接线传入实时在线状态，避免无人服务器中的模组事件偷跑进度。 */
+    public void registerGunfire(boolean hasActivePlayers) {
+        if (status != CampaignStatus.RUNNING || !hasActivePlayers) {
             return;
         }
         attention = PursuitPolicy.afterGunfireAttention(attention);
         pursuitDistance = PursuitPolicy.afterGunfirePursuit(pursuitDistance);
+        applyInfectionEvent(InfectionPolicy.Event.GUNFIRE);
         setDirty();
     }
 
     public void registerExplosion() {
-        if (status != CampaignStatus.RUNNING) {
+        registerExplosion(true);
+    }
+
+    public void registerExplosion(boolean hasActivePlayers) {
+        if (status != CampaignStatus.RUNNING || !hasActivePlayers) {
             return;
         }
         attention = PursuitPolicy.afterExplosionAttention(attention);
         pursuitDistance = PursuitPolicy.afterExplosionPursuit(pursuitDistance);
+        applyInfectionEvent(InfectionPolicy.Event.EXPLOSION);
         setDirty();
+    }
+
+    /** 公共尸潮事件入口；当前由抽象后方尸潮追上列车时调用。 */
+    public void registerHorde() {
+        registerHorde(true);
+    }
+
+    public void registerHorde(boolean hasActivePlayers) {
+        if (status != CampaignStatus.RUNNING || !hasActivePlayers) {
+            return;
+        }
+        applyInfectionEvent(InfectionPolicy.Event.HORDE);
+        setDirty();
+    }
+
+    private void updateInfectionProgress(boolean hasActivePlayers) {
+        InfectionPolicy.Sample previous = infectionSample();
+        InfectionPolicy.Sample next = InfectionPolicy.sample(
+                previous,
+                pursuitDistance,
+                hasActivePlayers);
+        if (next.equals(previous)) {
+            return;
+        }
+        infectionStage = next.stageIndex();
+        infectionTicks = next.infectionTicks();
+        // 与现有 totalActiveTicks 一样按低频检查点标脏；阶段跃迁必须立即落盘。
+        if (next.stage() != previous.stage()
+                || next.infectionTicks() / 200L != previous.infectionTicks() / 200L) {
+            setDirty();
+        }
+    }
+
+    private void applyInfectionEvent(InfectionPolicy.Event event) {
+        InfectionPolicy.Sample next = InfectionPolicy.onEvent(
+                infectionSample(),
+                event,
+                true);
+        applyInfectionSample(next);
+    }
+
+    private void applyInfectionSample(InfectionPolicy.Sample next) {
+        infectionStage = next.stageIndex();
+        infectionTicks = next.infectionTicks();
     }
 
     private TickOutcome updatePursuitPressure() {
@@ -928,7 +999,8 @@ public final class CampaignSavedData extends SavedData {
                 pursuitDistance,
                 routeSegment,
                 lastPursuitRouteSegment,
-                day);
+                day,
+                infectionSample().stage());
         if (next.attention() != attention
                 || next.pursuitDistance() != pursuitDistance
                 || next.routeSegment() != lastPursuitRouteSegment) {
@@ -944,8 +1016,19 @@ public final class CampaignSavedData extends SavedData {
                         status,
                         day,
                         next.pursuitDistance(),
-                        activeMission != null)
-                || !createMission(MissionType.ZOMBIE_BLOCKADE)) {
+                        activeMission != null)) {
+            return TickOutcome.NONE;
+        }
+
+        // 先预览本次尸潮事件可能跨越的感染阈值，让新围攻立即采用新阶段强度；
+        // 只有任务成功创建后才提交事件，避免失败重试重复累计。
+        InfectionPolicy.Sample hordeInfection = InfectionPolicy.afterHorde(
+                infectionSample(),
+                true);
+        if (!createMission(
+                MissionType.ZOMBIE_BLOCKADE,
+                effectivePlayers,
+                hordeInfection.stage())) {
             return TickOutcome.NONE;
         }
 
@@ -953,6 +1036,7 @@ public final class CampaignSavedData extends SavedData {
         // at zero distance until turn-in or fallback restores it; the active
         // mission prevents a second siege while the first is unresolved.
         lastPursuitRouteSegment = routeSegment;
+        applyInfectionSample(hordeInfection);
         setDirty();
         return TickOutcome.SIEGE_TRIGGERED;
     }
@@ -1014,10 +1098,13 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public TickOutcome tick(int activePlayers) {
-        if (status != CampaignStatus.RUNNING) {
+        if (status != CampaignStatus.RUNNING || activePlayers <= 0) {
             return TickOutcome.NONE;
         }
 
+        // 感染计时独立于 day，在终局日计时封顶后仍可由在线 tick 继续推进；
+        // 这一步必须位于 finalDayElapsed 的提前返回之前。
+        updateInfectionProgress(true);
         ensureFinaleHub();
         TickOutcome finaleOutcome = reconcileFinaleState();
         if (finaleOutcome != TickOutcome.NONE) {
@@ -1224,6 +1311,13 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean createMission(MissionType type, int teamSize) {
+        return createMission(type, teamSize, infectionSample().stage());
+    }
+
+    private boolean createMission(
+            MissionType type,
+            int teamSize,
+            InfectionPolicy.Stage intensityStage) {
         if (type == null
                 || !FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || (type.blocksRoute()
@@ -1233,7 +1327,10 @@ public final class CampaignSavedData extends SavedData {
                 || !MissionPoolPolicy.mayCreateMainline(missionHistory, type)) {
             return false;
         }
-        int target = PopulationScalingPolicy.missionTarget(type, teamSize);
+        int target = PopulationScalingPolicy.missionTarget(
+                type,
+                teamSize,
+                intensityStage);
         activeMission = ActiveMission.create(type, day, routeSegment, target);
         activeKeyMission = null;
         missionSequence++;
@@ -2179,13 +2276,16 @@ public final class CampaignSavedData extends SavedData {
 
         SplittableRandom random = missionRandom(0x444159L);
         boolean any = false;
-        double chance = Math.min(0.85D, 0.30D + day * 0.004D);
+        InfectionPolicy.Stage stage = infectionSample().stage();
+        double chance = Math.min(
+                0.85D,
+                InfectionPolicy.eventChance(0.30D + day * 0.004D, stage));
         if (random.nextDouble() < chance) {
             any = MissionPoolPolicy.selectMainMissionType(missionHistory, random)
                     .map(this::createMission)
                     .orElse(false);
         }
-        if (random.nextDouble() < 0.45D) {
+        if (random.nextDouble() < InfectionPolicy.eventChance(0.45D, stage)) {
             any |= MissionPoolPolicy.selectOptionalType(random)
                     .map(this::proposeOptionalMission)
                     .orElse(false);
@@ -2205,7 +2305,10 @@ public final class CampaignSavedData extends SavedData {
         }
 
         SplittableRandom random = missionRandom(0x524f555445L ^ routeSegment);
-        if (routeSegment % 3 != 0 && random.nextDouble() >= 0.35D) {
+        double routeEventChance = InfectionPolicy.eventChance(
+                0.35D,
+                infectionSample().stage());
+        if (routeSegment % 3 != 0 && random.nextDouble() >= routeEventChance) {
             return false;
         }
         return createPacedMission(random);
@@ -2282,7 +2385,11 @@ public final class CampaignSavedData extends SavedData {
                         ensureFinaleMissionId(),
                         MissionType.ZOMBIE_BLOCKADE,
                         FINAL_DAY,
-                        finaleHubRouteSegment);
+                        finaleHubRouteSegment,
+                        PopulationScalingPolicy.missionTarget(
+                                MissionType.ZOMBIE_BLOCKADE,
+                                effectivePlayers,
+                                infectionSample().stage()));
                 setDirty();
                 yield TickOutcome.FINALE_MISSION_STARTED;
             }
@@ -2430,6 +2537,19 @@ public final class CampaignSavedData extends SavedData {
 
     public int lastPursuitRouteSegment() {
         return lastPursuitRouteSegment;
+    }
+
+    public int infectionStage() {
+        return infectionStage;
+    }
+
+    public long infectionTicks() {
+        return infectionTicks;
+    }
+
+    /** 为关注度、围攻、事件导演和外部同步提供同一份只读阶段采样。 */
+    public InfectionPolicy.Sample infectionSample() {
+        return InfectionPolicy.snapshot(infectionStage, infectionTicks);
     }
 
     public ActiveMission activeMission() {

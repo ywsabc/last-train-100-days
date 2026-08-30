@@ -131,7 +131,9 @@ public final class MissionEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(level.getServer());
-        data.registerExplosion();
+        boolean hasActivePlayers = level.getServer().getPlayerList().getPlayers().stream()
+                .anyMatch(player -> !player.isSpectator());
+        data.registerExplosion(hasActivePlayers);
         event.getAffectedBlocks().removeIf(pos ->
                 MissionWorldDirector.isProtectedMissionBlock(data.activeMission(), pos)
                         || data.optionalMissions().stream().anyMatch(mission ->

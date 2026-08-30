@@ -85,9 +85,22 @@ public final class PopulationScalingPolicy {
      * curve. A one-player campaign always keeps the existing baseline values.
      */
     public static int missionTarget(MissionType type, int players) {
+        return missionTarget(type, players, InfectionPolicy.Stage.LATENT);
+    }
+
+    /**
+     * 尸潮封锁在人数倍率之后叠加感染阶段强度；其他任务的材料目标不受感染阶段
+     * 影响，避免把世界难度误传导为维修用料膨胀。阶段 0 倍率为 1，保持旧契约。
+     */
+    public static int missionTarget(
+            MissionType type,
+            int players,
+            InfectionPolicy.Stage infectionStage) {
         Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(infectionStage, "infectionStage");
         double multiplier = type == MissionType.ZOMBIE_BLOCKADE
                 ? enemyMultiplier(players)
+                        * infectionStage.effects().siegeIntensityMultiplier()
                 : materialMultiplier(players);
         return Math.max(1, (int) Math.round(type.defaultTarget() * multiplier));
     }

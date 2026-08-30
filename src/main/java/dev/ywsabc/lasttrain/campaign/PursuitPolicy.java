@@ -57,12 +57,52 @@ public final class PursuitPolicy {
     }
 
     public static Sample sample(
+            int attention,
+            int pursuitDistance,
+            int currentRouteSegment,
+            int previousRouteSegment,
+            int day,
+            InfectionPolicy.Stage infectionStage) {
+        return sample(
+                CampaignMode.STORY_100_DAYS,
+                attention,
+                pursuitDistance,
+                currentRouteSegment,
+                previousRouteSegment,
+                day,
+                infectionStage);
+    }
+
+    public static Sample sample(
             CampaignMode mode,
             int attention,
             int pursuitDistance,
             int currentRouteSegment,
             int previousRouteSegment,
             int day) {
+        return sample(
+                mode,
+                attention,
+                pursuitDistance,
+                currentRouteSegment,
+                previousRouteSegment,
+                day,
+                InfectionPolicy.Stage.LATENT);
+    }
+
+    /**
+     * 感染阶段接线版本。旧入口固定使用阶段 0，从而保持既有纯策略契约；战役存档
+     * 通过此入口让扩散/崩溃阶段提高关注度下限和停车时的追击消耗。
+     */
+    public static Sample sample(
+            CampaignMode mode,
+            int attention,
+            int pursuitDistance,
+            int currentRouteSegment,
+            int previousRouteSegment,
+            int day,
+            InfectionPolicy.Stage infectionStage) {
+        Objects.requireNonNull(infectionStage, "infectionStage");
         int movedSegments = Math.clamp(
                 currentRouteSegment - previousRouteSegment,
                 0,
@@ -70,18 +110,20 @@ public final class PursuitPolicy {
 
         if (movedSegments > 0) {
             attention = Math.max(
-                    minAttention(mode, day),
+                    minAttention(mode, day, infectionStage),
                     attention - movedSegments * MOVING_ATTENTION_COOLING_PER_SEGMENT);
             pursuitDistance = Math.min(
                     MAX_PURSUIT_DISTANCE,
                     pursuitDistance + movedSegments * PURSUIT_GAIN_PER_SEGMENT);
         } else {
-            attention = Math.min(
-                    MAX_ATTENTION,
-                    attention + PARKED_ATTENTION_GROWTH_PER_SAMPLE);
+            attention = Math.max(
+                    minAttention(mode, day, infectionStage),
+                    Math.min(
+                            MAX_ATTENTION,
+                            attention + PARKED_ATTENTION_GROWTH_PER_SAMPLE));
             pursuitDistance = Math.max(
                     0,
-                    pursuitDistance - PARKED_PURSUIT_DRAIN_PER_SAMPLE);
+                    pursuitDistance - parkedPursuitDrain(infectionStage));
         }
         return new Sample(attention, pursuitDistance, currentRouteSegment);
     }
@@ -113,6 +155,31 @@ public final class PursuitPolicy {
         return Math.min(
                 MAX_ATTENTION,
                 60 + Math.max(0, day - FinalePolicy.FINAL_DAY) / 10);
+    }
+
+    /** 当前日程与感染阶段两条难度曲线都只能抬高下限，不能互相降级。 */
+    public static int minAttention(int day, InfectionPolicy.Stage infectionStage) {
+        return minAttention(CampaignMode.STORY_100_DAYS, day, infectionStage);
+    }
+
+    public static int minAttention(
+            CampaignMode mode,
+            int day,
+            InfectionPolicy.Stage infectionStage) {
+        Objects.requireNonNull(infectionStage, "infectionStage");
+        return Math.max(
+                minAttention(mode, day),
+                infectionStage.effects().minAttention());
+    }
+
+    /** 将阶段追击倍率集中取整，保证同一存档在不同接线点得到相同整数消耗。 */
+    public static int parkedPursuitDrain(InfectionPolicy.Stage infectionStage) {
+        Objects.requireNonNull(infectionStage, "infectionStage");
+        return Math.max(
+                1,
+                (int) Math.round(
+                        PARKED_PURSUIT_DRAIN_PER_SAMPLE
+                                * infectionStage.effects().pursuitDrainMultiplier()));
     }
 
     public static AttentionLevel attentionLevel(int attention) {

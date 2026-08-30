@@ -130,7 +130,9 @@ public final class TaczGunfireBridge {
             if (!claimPulse(shooter, level.getGameTime(), settings.pulseCooldownTicks())) {
                 return;
             }
-            CampaignSavedData.get(level.getServer()).registerGunfire();
+            boolean hasActivePlayers = level.getServer().getPlayerList().getPlayers().stream()
+                    .anyMatch(player -> !player.isSpectator());
+            CampaignSavedData.get(level.getServer()).registerGunfire(hasActivePlayers);
             attractLoadedZombies(level, shooter, settings);
         } catch (IllegalAccessException | InvocationTargetException | RuntimeException | LinkageError exception) {
             // An optional integration must never break TaCZ's firing code path.

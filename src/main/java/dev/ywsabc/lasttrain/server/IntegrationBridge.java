@@ -26,6 +26,8 @@ public final class IntegrationBridge {
         executeOptional(server, "incontrol setnumber lasttrain_players " + data.effectivePlayers());
         executeOptional(server, "incontrol setnumber lasttrain_attention " + data.attention());
         executeOptional(server, "incontrol setnumber lasttrain_pursuit " + data.pursuitDistance());
+        executeOptional(server, "incontrol setnumber lasttrain_infection_stage "
+                + data.infectionSample().stageIndex());
     }
 
     private static void executeOptional(MinecraftServer server, String command) {

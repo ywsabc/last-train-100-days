@@ -7,6 +7,7 @@ import com.mojang.brigadier.context.CommandContext;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignMode;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
+import dev.ywsabc.lasttrain.campaign.InfectionPolicy;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
 import dev.ywsabc.lasttrain.campaign.TeamPermissionPolicy;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
@@ -172,6 +173,7 @@ public final class LastTrainCommands {
     private static Component statusMessage(CampaignSavedData data, int onlinePlayers) {
         PursuitPolicy.AttentionLevel attentionLevel =
                 PursuitPolicy.attentionLevel(data.attention());
+        InfectionPolicy.Sample infection = data.infectionSample();
         return Component.translatable(
                 "command.lasttrain.status",
                 data.day(),
@@ -180,6 +182,10 @@ public final class LastTrainCommands {
                 data.status().name(),
                 data.routeSegment(),
                 data.threat(),
+                infection.stageIndex(),
+                Component.translatable(
+                        "infection.lasttrain.stage."
+                                + infection.stage().serializedName()),
                 data.effectivePlayers(),
                 onlinePlayers,
                 data.attention(),
