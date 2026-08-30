@@ -16,9 +16,15 @@ import net.minecraft.nbt.Tag;
  * exit, so a side branch can never replace the way forward, and the interest
  * points match the template — STATION carries exactly one station interest
  * point, CITY_BYPASS exactly one city interest point, and the straight and
- * bridge/tunnel templates carry none. Construction rejects plans that break
- * either invariant, so the realization layout can rely on the interest
- * points it reads instead of crashing on a missing entry.</p>
+ * bridge/tunnel templates carry none. The exit combination matches the
+ * template too: the main-line exit always anchors at the segment end
+ * (offset {@value RouteGeometry#SEGMENT_LENGTH}), CITY_BYPASS carries exactly
+ * one branch exit inside the segment whose anchor never collides with the
+ * main-line exit, and STRAIGHT / STATION / BRIDGE_TUNNEL carry no branch
+ * exit at all. Every exit anchor lies within [0, 64]. Construction rejects
+ * plans that break any invariant, so the realization layout can rely on the
+ * interest points and exits it reads instead of crashing on a missing
+ * entry.</p>
  *
  * <p>Plans for pending (planned but not yet realized) segments are persisted
  * in the campaign save so committed plans are adopted as-is on reload and
@@ -48,6 +54,49 @@ public record RouteSegmentPlan(
                     "Every route segment must have exactly one main-line exit, got "
                             + mainExitCount);
         }
+        long branchExitCount = exits.stream()
+                .filter(exit -> exit.kind() == RouteExitKind.BRANCH)
+                .count();
+        switch (template) {
+            case CITY_BYPASS -> {
+                if (branchExitCount != 1) {
+                    throw new IllegalArgumentException(
+                            "A city bypass plan must carry exactly one branch exit, got "
+                                    + branchExitCount);
+                }
+            }
+            case STRAIGHT, STATION, BRIDGE_TUNNEL -> {
+                if (branchExitCount != 0) {
+                    throw new IllegalArgumentException(
+                            template + " plans carry no branch exits, got " + branchExitCount);
+                }
+            }
+        }
+        // Anchor geometry: the main-line exit always sits at the segment end
+        // and no branch anchor may collide with it. RouteExit enforces the
+        // same bounds independently; the plan-level check keeps the invariant
+        // explicit on the committed record.
+        RouteExit mainExit = mainExit(exits);
+        for (RouteExit exit : exits) {
+            if (exit.anchorOffset() < 0
+                    || exit.anchorOffset() > RouteGeometry.SEGMENT_LENGTH) {
+                throw new IllegalArgumentException(
+                        "Exit anchors must lie within [0, " + RouteGeometry.SEGMENT_LENGTH
+                                + "], got " + exit.anchorOffset());
+            }
+            if (exit.kind() == RouteExitKind.MAIN_LINE
+                    && exit.anchorOffset() != RouteGeometry.SEGMENT_LENGTH) {
+                throw new IllegalArgumentException(
+                        "The main-line exit must anchor at the segment end (offset "
+                                + RouteGeometry.SEGMENT_LENGTH + "), got " + exit.anchorOffset());
+            }
+            if (exit.kind() == RouteExitKind.BRANCH
+                    && exit.anchorOffset() == mainExit.anchorOffset()) {
+                throw new IllegalArgumentException(
+                        "A branch exit must not collide with the main-line exit anchor "
+                                + mainExit.anchorOffset());
+            }
+        }
         requireTemplateShape(template, pois);
     }
 
@@ -75,6 +124,15 @@ public record RouteSegmentPlan(
                 }
             }
         }
+    }
+
+    private static RouteExit mainExit(List<RouteExit> exits) {
+        for (RouteExit exit : exits) {
+            if (exit.kind() == RouteExitKind.MAIN_LINE) {
+                return exit;
+            }
+        }
+        throw new IllegalStateException("Lost the main-line exit while validating exits");
     }
 
     /** The single main-line exit; plans without one are rejected on construction. */

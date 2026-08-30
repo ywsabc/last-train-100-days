@@ -10,42 +10,41 @@ import java.util.UUID;
 /**
  * Durable reward outbox policy for optional missions.
  *
- * <p>Ordering contract: the saved data persists a PENDING receipt before the
- * world mutation runs, and the shared supply crate persists one marker per
- * mission — a mission-keyed marker set, never a single overwritten operation
- * id. On restart the dispatcher reconciles instead of assuming either side
- * won:</p>
+ * <p>The persisted saved data is the sole authority over reward delivery.
+ * The decision table is deliberately simple:</p>
  * <ul>
- * <li>PENDING receipt, marker absent → grant, then claim (normal run, or a
- * crash before the world mutation);</li>
- * <li>PENDING receipt, marker present → {@code CLAIM_ONLY}: the receipt
- * flips to CLAIMED without any crate access — the crate is never restocked,
- * even when the player already looted it (crash between world write and
- * receipt update);</li>
- * <li>CLAIMED receipt, marker absent → the chunk save was lost: grant again —
- * the absent marker proves no crate exists, so this cannot duplicate;</li>
- * <li>CLAIMED receipt, marker present → nothing to do.</li>
+ * <li>{@link ReceiptState#PENDING} → {@link GrantDecision#GRANT_AND_CLAIM}:
+ * one dispatch attempt per tick, no matter what the world side looks like;</li>
+ * <li>{@link ReceiptState#CLAIMED} → {@link GrantDecision#NO_OP} forever. A
+ * broken, looted, rolled-back or otherwise missing crate is never restocked
+ * and never re-read for a decision — the receipt alone ends the grant.</li>
  * </ul>
- * Every combination of the two crash orders therefore delivers the reward
- * exactly once: no loss and no duplication. Because markers are kept per
- * mission, any number of receipts can share the crate: a grant for mission A
- * never overwrites the marker of mission B, so two CLAIMED receipts deliver
- * exactly once no matter how many dispatch rounds run.</p>
+ * A successful dispatch writes the whole payload into the crate, persists the
+ * diagnostic operation marker and flips the receipt to CLAIMED in the same
+ * tick. Any failure (crate full, space insufficient, chunk unloaded) leaves
+ * the receipt PENDING and the next tick retries. The only accepted crash
+ * trade-off: if the crate chunk save is lost after the receipt turned
+ * CLAIMED, the reward is lost but never duplicated — the saved data wins over
+ * the world.
  *
- * <p>Grants are shortfall-based: every payload kind adds exactly
- * {@code target - already present} items, so a retry after a partial write
- * never duplicates the entries that already landed. A dispatch round only
- * writes the marker and reports the receipt claimable after a real net
- * addition: a crate that already holds the whole payload (player-deposited
- * items, not the grant) stays unmarked and the receipt stays PENDING until
- * the dispatcher can actually add something. The crate adapter reports the
- * count it actually placed, so a full crate contributes zero net additions
- * instead of pretending to have delivered.</p>
+ * <p>Each grant attempt is atomic per receipt: the exact payload either lands
+ * in full or is deferred in full, so a failed attempt can never leave a
+ * partial reward behind. Existing matching crate contents may be merge
+ * targets, but never count as proof that part of this receipt was already
+ * delivered. Receipts are independent: one receipt always submits its own
+ * complete payload against the crate as it stands (including earlier
+ * receipts' committed writes of the same round), and its success or deferral
+ * never influences another receipt's decision. Because a receipt only ever
+ * flips PENDING → CLAIMED once and CLAIMED never dispatches again, every
+ * receipt is delivered at most once during normal dispatch.</p>
  *
- * <p>Receipts and crate markers are capped at {@link #MAX_RECEIPTS} /
- * {@link #MAX_MARKERS}. Eviction only ever drops CLAIMED history first, and a
- * crate marker eviction always pairs with its CLAIMED receipt so neither side
- * can re-open the grant loop.</p>
+ * <p>The crate marker is kept per mission for diagnostics only: it records
+ * which missions touched the shared crate, and a missing marker on a CLAIMED
+ * receipt explains a lost crate in the logs. Markers never participate in
+ * the grant decision. Receipts and crate markers are capped at
+ * {@link #MAX_RECEIPTS} / {@link #MAX_MARKERS}; eviction only ever drops
+ * CLAIMED history first, and a crate marker eviction always pairs with its
+ * CLAIMED receipt so neither side can outlive the other.</p>
  *
  * <p>Payloads are registry-free {@link RewardItem} entries so the policy stays
  * unit-testable without a running game. The world adapter materializes them
@@ -69,7 +68,6 @@ public final class RewardOutboxPolicy {
 
     public enum GrantDecision {
         GRANT_AND_CLAIM,
-        CLAIM_ONLY,
         NO_OP
     }
 
@@ -110,22 +108,22 @@ public final class RewardOutboxPolicy {
 
     /**
      * World-side crate abstraction so the fill logic stays pure. The adapter
-     * wraps the chest block entity; {@link #addStack} merges into matching
-     * stacks or places into a free slot and reports the count it actually
-     * placed, and {@link #contents()} maps real item stacks back to
-     * registry-free {@link RewardItem} entries. Operation markers are kept
-     * per mission, oldest first, so several missions can share one crate
-     * without overwriting each other's markers.
+     * wraps the chest block entity; {@link #addAll} either places a whole
+     * batch of stacks or none of them, and {@link #contents()} maps real item
+     * stacks back to registry-free {@link RewardItem} entries. Operation
+     * markers are kept per mission, oldest first, so several missions can
+     * share one crate without overwriting each other's markers.
      */
     public interface CrateAccess {
         List<RewardItem> contents();
 
         /**
-         * Adds the stack and returns the number of items actually placed:
-         * 0 when the crate is full or rejects the write. The caller settles
-         * on the net addition, never on the requested count.
+         * Atomically adds the whole batch: every stack lands in full, or
+         * nothing is written. Reports false — leaving the crate untouched —
+         * when the crate cannot hold the batch or rejects a write, so the
+         * caller defers the whole receipt instead of leaving partial residue.
          */
-        int addStack(RewardItem stack);
+        boolean addAll(List<RewardItem> stacks);
 
         /** Operation markers persisted on the crate, oldest first. */
         List<String> operationIds();
@@ -143,11 +141,17 @@ public final class RewardOutboxPolicy {
         return OPERATION_PREFIX + missionId + OPERATION_SUFFIX;
     }
 
-    public static GrantDecision reconcile(ReceiptState state, boolean worldMarkerPresent) {
+    /**
+     * The grant decision table. The saved data is the sole authority:
+     * PENDING always means "try one atomic dispatch", CLAIMED always means
+     * "never dispatch again". The world side — crate, marker, items — never
+     * influences the decision.
+     */
+    public static GrantDecision reconcile(ReceiptState state) {
         Objects.requireNonNull(state, "state");
         return switch (state) {
-            case PENDING -> worldMarkerPresent ? GrantDecision.CLAIM_ONLY : GrantDecision.GRANT_AND_CLAIM;
-            case CLAIMED -> worldMarkerPresent ? GrantDecision.NO_OP : GrantDecision.GRANT_AND_CLAIM;
+            case PENDING -> GrantDecision.GRANT_AND_CLAIM;
+            case CLAIMED -> GrantDecision.NO_OP;
         };
     }
 
@@ -193,11 +197,10 @@ public final class RewardOutboxPolicy {
     }
 
     /**
-     * Applies one dispatch round to a receipt. {@link GrantDecision#CLAIM_ONLY}
-     * reports the receipt claimable without any crate access — {@code crate}
-     * may be null and is never touched; {@link GrantDecision#GRANT_AND_CLAIM}
-     * fills only the per-kind shortfall and reports claimable only after a
-     * real net addition; {@link GrantDecision#NO_OP} reports nothing.
+     * Applies one grant decision. {@link GrantDecision#GRANT_AND_CLAIM} fills
+     * the whole payload atomically and reports claimable only after the crate
+     * holds it and the diagnostic marker was written; {@link GrantDecision#NO_OP}
+     * touches nothing.
      *
      * @param crate crate access, required only for GRANT_AND_CLAIM
      * @return true when the caller must flip the receipt to CLAIMED
@@ -209,37 +212,26 @@ public final class RewardOutboxPolicy {
             List<RewardItem> payload) {
         Objects.requireNonNull(decision, "decision");
         return switch (decision) {
-            case CLAIM_ONLY -> true;
             case GRANT_AND_CLAIM -> fillCrate(crate, operationId, payload);
             case NO_OP -> false;
         };
     }
 
     /**
-     * Idempotent shortfall grant: every payload kind adds exactly
-     * {@code target - already present} items, so a retry after a partial
-     * write never duplicates the entries that already landed. The marker is
-     * written only after a real net addition and a complete payload: a crate
-     * that already holds the payload (player-deposited items, not the grant)
-     * or cannot accept anything stays unmarked, so the receipt stays PENDING
-     * instead of misjudging itself as delivered.
+     * Atomic all-or-nothing grant of one receipt: the exact payload is
+     * submitted on every PENDING attempt and either lands in full or, when
+     * the crate cannot hold it, leaves the crate untouched. Existing matching
+     * contents and diagnostic markers never reduce or suppress the batch. On
+     * success the diagnostic marker is persisted before the receipt flips.
      *
-     * @return true when the crate now holds the payload and this round added
-     *     at least one item
+     * @return true when the crate now holds the payload and the marker was
+     *     written; false leaves the crate untouched
      */
     public static boolean fillCrate(CrateAccess crate, String operationId, List<RewardItem> payload) {
         Objects.requireNonNull(crate, "crate");
         Objects.requireNonNull(operationId, "operationId");
         Objects.requireNonNull(payload, "payload");
-        int netAdded = 0;
-        for (RewardItem stack : payload) {
-            int missing = stack.count() - countPresent(crate.contents(), stack);
-            if (missing > 0) {
-                netAdded += crate.addStack(
-                        new RewardItem(stack.itemId(), missing, stack.credentialMissionId()));
-            }
-        }
-        if (netAdded == 0 || !containsPayload(crate.contents(), payload)) {
+        if (!crate.addAll(payload)) {
             return false;
         }
         crate.addOperationMarker(operationId);

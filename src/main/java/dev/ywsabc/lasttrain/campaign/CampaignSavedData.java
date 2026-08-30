@@ -1526,8 +1526,9 @@ public final class CampaignSavedData extends SavedData {
     /**
      * Objective completion gate for optional missions: persists the
      * REWARD_PENDING receipt before any world mutation happens, then the
-     * reward dispatcher executes the crate fill and flips the receipt to
-     * CLAIMED. The outbox reconciles both crash orders afterwards.
+     * reward dispatcher executes the atomic crate fill and flips the receipt
+     * to CLAIMED in the same tick. The receipt alone is the authority over
+     * delivery: CLAIMED is terminal, PENDING retries once per tick.
      */
     public boolean completeOptionalMission(UUID id) {
         ActiveMission mission = optionalMission(id).orElse(null);
@@ -2513,8 +2514,9 @@ public final class CampaignSavedData extends SavedData {
 
     /**
      * Durable reward outbox entry. PENDING is persisted before the world
-     * mutation runs; the dispatcher flips it to CLAIMED afterwards and the
-     * world-side operation marker reconciles every crash order on restart.
+     * mutation runs; the dispatcher flips it to CLAIMED after the atomic
+     * crate fill. The receipt is the sole authority over delivery: a CLAIMED
+     * receipt is never re-granted, whatever the world side looks like.
      */
     public record RewardReceipt(
             UUID missionId,

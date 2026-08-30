@@ -36,7 +36,10 @@ import net.neoforged.fml.ModList;
  * {@link #trackRuns(RouteSegmentLayout)} sequence — through TongDa's track
  * spawner, which owns physical track placement; persistent route progress
  * advances only after all 64 Create tracks are observed with the expected
- * shape.</p>
+ * shape AND every branch run of the segment is physically complete. A
+ * queued, materializing or conflicting branch keeps the segment uncommitted
+ * — never marked generated, never plan-trimmed — and the next tick retries
+ * within a bounded per-tick retry budget.</p>
  */
 public final class RouteDirector {
     private static final int UPDATE_ALL = 3;
@@ -45,10 +48,18 @@ public final class RouteDirector {
     private static final int SEGMENTS_AHEAD = 2;
     private static final int VEHICLE_CLEARANCE_RADIUS = 3;
     private static final int VEHICLE_CLEARANCE_HEIGHT = 6;
+    /**
+     * Per-tick submission attempts for one branch track run. The bound keeps
+     * a failing branch from spinning the director into an infinite loop: the
+     * segment simply waits for the next tick and retries then.
+     */
+    static final int BRANCH_SUBMISSION_ATTEMPTS_PER_TICK = 1;
     private static boolean missingCreateTrackLogged;
     private static boolean safetyLimitLogged;
     private static int lastReportedTongDaSegment = -1;
     private static TongDaTrackBridge.SubmissionStatus lastReportedTongDaStatus;
+    private static int lastReportedBranchSegment = -1;
+    private static TongDaTrackBridge.SubmissionStatus lastReportedBranchStatus;
 
     private RouteDirector() {
     }
@@ -122,15 +133,21 @@ public final class RouteDirector {
         desiredSegment = Math.min(CampaignSavedData.MAX_ROUTE_SEGMENT, desiredSegment);
 
         int nextSegment = data.generatedRouteSegment() + 1;
-        if (nextSegment <= desiredSegment && generateSegment(level, data, trackBlock, nextSegment)) {
-            data.markRouteSegmentGenerated(nextSegment);
-            data.dropRoutePlanThrough(nextSegment);
-            lastReportedTongDaSegment = -1;
-            lastReportedTongDaStatus = null;
-            LastTrain.LOGGER.info(
-                    "TongDa materialized guaranteed route segment {} (through x offset {})",
-                    nextSegment,
-                    RouteGeometry.segmentEndOffset(nextSegment));
+        if (nextSegment <= desiredSegment) {
+            SegmentGeneration outcome = generateSegment(level, data, trackBlock, nextSegment);
+            if (outcome != null
+                    && commitMaterializedSegment(
+                            data,
+                            nextSegment,
+                            outcome.mainlineComplete(),
+                            outcome.branchResults())) {
+                lastReportedTongDaSegment = -1;
+                lastReportedTongDaStatus = null;
+                LastTrain.LOGGER.info(
+                        "TongDa materialized guaranteed route segment {} (through x offset {})",
+                        nextSegment,
+                        RouteGeometry.segmentEndOffset(nextSegment));
+            }
         }
     }
 
@@ -261,7 +278,7 @@ public final class RouteDirector {
         return List.copyOf(runs);
     }
 
-    private static boolean generateSegment(
+    private static SegmentGeneration generateSegment(
             ServerLevel level,
             CampaignSavedData data,
             Block trackBlock,
@@ -270,7 +287,7 @@ public final class RouteDirector {
             LastTrain.LOGGER.warn(
                     "Fault injected: route segment {} generation failed",
                     segment);
-            return false;
+            return null;
         }
         RouteSegmentLayout layout = layoutFor(data, segment);
         BlockPos borderProbe = layout.borderProbe();
@@ -279,11 +296,13 @@ public final class RouteDirector {
                     "Route segment {} reaches the world border at {}; generation is paused",
                     segment,
                     borderProbe);
-            return false;
+            return null;
         }
 
         // The deck follows the plan-derived main-line steps instead of a
         // fixed eastbound loop: position and direction come from the layout.
+        // Re-placement is idempotent: already-placed blocks are set to their
+        // own state again, nothing is duplicated.
         for (RouteSegmentLayout.RouteTrackStep step : layout.mainlineSteps()) {
             BlockPos deckCenter = step.position().below();
             clearVehicleEnvelope(level, deckCenter, trackBlock);
@@ -300,7 +319,7 @@ public final class RouteDirector {
 
         TongDaTrackBridge.SegmentInspection inspection =
                 TongDaTrackBridge.inspectEastboundSegment(level, layout.trackStart());
-        if (!inspection.actuallyComplete()) {
+        if (mustSubmitMainline(inspection)) {
             prepareTongDaControlPosition(level, inspection.spawnerPosition());
             TongDaTrackBridge.SubmissionResult submission =
                     TongDaTrackBridge.submitStraightRun(
@@ -309,25 +328,195 @@ public final class RouteDirector {
                             layout.mainlineDirection(),
                             RouteGeometry.SEGMENT_LENGTH);
             reportTongDaStatus(segment, submission);
-            return false;
+        }
+        if (!inspection.actuallyComplete()) {
+            // The main line is not physically complete yet: branch runs are
+            // not attempted and the segment cannot commit. The eastbound XO
+            // corridor keeps advancing normally across ticks.
+            return new SegmentGeneration(false, List.of());
         }
 
         if (layout.hasPlatform()) {
             buildPlatform(level, layout.platformAnchor(), layout.platformHalfLength());
         }
         // Branch track runs are submitted in layout order after the main
-        // line completed; TongDa owns their physical placement.
+        // line completed; TongDa owns their physical placement. Each run
+        // gets a bounded per-tick retry budget — a shape conflict or a still
+        // queued run keeps the whole segment uncommitted and the next tick
+        // retries.
+        List<TongDaTrackBridge.SubmissionResult> branchResults = new java.util.ArrayList<>();
         for (RouteSegmentLayout.BranchTrackSection section : layout.branchTrackSections()) {
-            TongDaTrackBridge.SubmissionResult result = TongDaTrackBridge.submitStraightRun(
-                    level, section.start(), section.direction(), section.length());
-            LastTrain.LOGGER.info(
-                    "Submitted {} branch track run of segment {} at {}: {}",
-                    section.kind(),
-                    segment,
-                    section.start(),
-                    result.status());
+            BranchRunAttempt attempt = attemptBranchRun(
+                    BRANCH_SUBMISSION_ATTEMPTS_PER_TICK,
+                    section,
+                    candidate -> TongDaTrackBridge.submitStraightRun(
+                            level, candidate.start(), candidate.direction(), candidate.length()));
+            reportBranchStatus(segment, section, attempt);
+            branchResults.add(attempt.result());
+        }
+        return new SegmentGeneration(true, branchResults);
+    }
+
+    /**
+     * Whether the main line must be (re)submitted: only while the physical
+     * inspection is not yet complete. A completed main line is therefore
+     * never resubmitted on later ticks while a failing branch keeps the
+     * segment uncommitted — the already-placed main line stays untouched.
+     */
+    static boolean mustSubmitMainline(TongDaTrackBridge.SegmentInspection inspection) {
+        java.util.Objects.requireNonNull(inspection, "inspection");
+        return !inspection.actuallyComplete();
+    }
+
+    /** Submits one branch track run candidate; the director wraps the TongDa bridge. */
+    @FunctionalInterface
+    interface BranchSubmitter {
+        TongDaTrackBridge.SubmissionResult submit(RouteSegmentLayout.BranchTrackSection section);
+    }
+
+    /**
+     * One bounded retry batch of a branch run submission: how many attempts
+     * the tick spent and the final submission result.
+     */
+    public record BranchRunAttempt(
+            int attempts,
+            TongDaTrackBridge.SubmissionResult result) {
+        public BranchRunAttempt {
+            java.util.Objects.requireNonNull(result, "result");
+            if (attempts < 1) {
+                throw new IllegalArgumentException(
+                        "A branch submission batch must spend at least one attempt, got "
+                                + attempts);
+            }
+        }
+
+        /** Only an ALREADY_COMPLETE report finishes the run. */
+        public boolean complete() {
+            return branchRunComplete(result);
+        }
+    }
+
+    /**
+     * Pure bounded retry loop for one branch run: at most
+     * {@code attemptsPerTick} submissions — the per-tick cap that prevents a
+     * failing branch from looping forever — stopping at the first completed
+     * report. A run still incomplete after the budget keeps the segment
+     * waiting for the next tick.
+     */
+    static BranchRunAttempt attemptBranchRun(
+            int attemptsPerTick,
+            RouteSegmentLayout.BranchTrackSection section,
+            BranchSubmitter submitter) {
+        java.util.Objects.requireNonNull(section, "section");
+        java.util.Objects.requireNonNull(submitter, "submitter");
+        if (attemptsPerTick < 1) {
+            throw new IllegalArgumentException(
+                    "Attempts per tick must be at least 1, got " + attemptsPerTick);
+        }
+        TongDaTrackBridge.SubmissionResult result = submitter.submit(section);
+        int attempts = 1;
+        while (attempts < attemptsPerTick && !branchRunComplete(result)) {
+            result = submitter.submit(section);
+            attempts++;
+        }
+        return new BranchRunAttempt(attempts, result);
+    }
+
+    /** Only an ALREADY_COMPLETE report finishes a branch run; everything else is pending work or failure. */
+    static boolean branchRunComplete(TongDaTrackBridge.SubmissionResult result) {
+        java.util.Objects.requireNonNull(result, "result");
+        return result.status() == TongDaTrackBridge.SubmissionStatus.ALREADY_COMPLETE;
+    }
+
+    /**
+     * Pure completion arithmetic for one segment: the commit needs the main
+     * line physically complete AND every branch run already complete — a
+     * queued, materializing or conflicting branch keeps the whole segment
+     * uncommitted.
+     */
+    static boolean commitEligible(
+            boolean mainlineComplete,
+            List<TongDaTrackBridge.SubmissionResult> branchResults) {
+        if (!mainlineComplete) {
+            return false;
+        }
+        for (TongDaTrackBridge.SubmissionResult result :
+                java.util.Objects.requireNonNull(branchResults, "branchResults")) {
+            if (!branchRunComplete(result)) {
+                return false;
+            }
         }
         return true;
+    }
+
+    /**
+     * Pure commit gate applied by the director tick after one materialization
+     * round: persistent route progress advances and the plan is trimmed only
+     * when the whole segment — main line plus every branch run — is
+     * physically complete. A conflicting or still-queued branch keeps the
+     * segment ungenerated and the plan untrimmed, so the next tick retries
+     * the same segment.
+     */
+    static boolean commitMaterializedSegment(
+            CampaignSavedData data,
+            int segment,
+            boolean mainlineComplete,
+            List<TongDaTrackBridge.SubmissionResult> branchResults) {
+        java.util.Objects.requireNonNull(data, "data");
+        if (!commitEligible(mainlineComplete, branchResults)) {
+            return false;
+        }
+        if (!data.markRouteSegmentGenerated(segment)) {
+            return false;
+        }
+        data.dropRoutePlanThrough(segment);
+        return true;
+    }
+
+    /** Evidence of one materialization round, feeding the pure commit gate. */
+    public record SegmentGeneration(
+            boolean mainlineComplete,
+            List<TongDaTrackBridge.SubmissionResult> branchResults) {
+        public SegmentGeneration {
+            branchResults = List.copyOf(
+                    java.util.Objects.requireNonNull(branchResults, "branchResults"));
+        }
+    }
+
+    private static void reportBranchStatus(
+            int segment,
+            RouteSegmentLayout.BranchTrackSection section,
+            BranchRunAttempt attempt) {
+        if (attempt.complete()) {
+            LastTrain.LOGGER.info(
+                    "Branch track run {} of segment {} is physically complete",
+                    section.kind(),
+                    segment);
+            return;
+        }
+        if (segment == lastReportedBranchSegment
+                && attempt.result().status() == lastReportedBranchStatus) {
+            return;
+        }
+        lastReportedBranchSegment = segment;
+        lastReportedBranchStatus = attempt.result().status();
+        if (attempt.attempts() >= BRANCH_SUBMISSION_ATTEMPTS_PER_TICK) {
+            LastTrain.LOGGER.warn(
+                    "Branch track run {} of segment {} used its per-tick retry budget "
+                            + "({} attempt(s)) without completing ({}): {}; the segment stays "
+                            + "ungenerated and waits for the next tick",
+                    section.kind(),
+                    segment,
+                    BRANCH_SUBMISSION_ATTEMPTS_PER_TICK,
+                    attempt.result().status(),
+                    attempt.result().detail());
+        } else {
+            LastTrain.LOGGER.info(
+                    "Branch track run {} of segment {} is not complete yet: {}",
+                    section.kind(),
+                    segment,
+                    attempt.result().status());
+        }
     }
 
     private static void clearVehicleEnvelope(

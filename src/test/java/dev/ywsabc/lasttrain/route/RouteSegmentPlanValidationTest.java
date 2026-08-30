@@ -82,6 +82,103 @@ class RouteSegmentPlanValidationTest {
     }
 
     @Test
+    void cityBypassPlansRequireExactlyOneBranchExit() {
+        RoutePoi city = new RoutePoi(RoutePoiType.CITY, 24);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteSegmentPlan(
+                        3, SEED, SegmentTemplate.CITY_BYPASS, List.of(city), List.of(MAIN_LINE)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteSegmentPlan(
+                        3,
+                        SEED,
+                        SegmentTemplate.CITY_BYPASS,
+                        List.of(city),
+                        List.of(
+                                MAIN_LINE,
+                                new RouteExit(RouteExitKind.BRANCH, 20),
+                                new RouteExit(RouteExitKind.BRANCH, 40))));
+    }
+
+    @Test
+    void straightStationAndBridgePlansRejectBranchExits() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteSegmentPlan(
+                        3,
+                        SEED,
+                        SegmentTemplate.STRAIGHT,
+                        List.of(),
+                        List.of(MAIN_LINE, new RouteExit(RouteExitKind.BRANCH, 20))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteSegmentPlan(
+                        3,
+                        SEED,
+                        SegmentTemplate.STATION,
+                        List.of(new RoutePoi(RoutePoiType.STATION, 24)),
+                        List.of(MAIN_LINE, new RouteExit(RouteExitKind.BRANCH, 20))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteSegmentPlan(
+                        3,
+                        SEED,
+                        SegmentTemplate.BRIDGE_TUNNEL,
+                        List.of(),
+                        List.of(MAIN_LINE, new RouteExit(RouteExitKind.BRANCH, 20))));
+    }
+
+    @Test
+    void validTemplateAndExitCombinationsStillConstruct() {
+        RouteExit branch = new RouteExit(RouteExitKind.BRANCH, 24);
+        // CITY_BYPASS: main + exactly one branch, next to the city POI.
+        assertEquals(
+                2,
+                new RouteSegmentPlan(
+                                3,
+                                SEED,
+                                SegmentTemplate.CITY_BYPASS,
+                                List.of(new RoutePoi(RoutePoiType.CITY, 24)),
+                                List.of(MAIN_LINE, branch))
+                        .exits()
+                        .size());
+        // STRAIGHT / STATION / BRIDGE_TUNNEL: main line only.
+        for (SegmentTemplate template :
+                List.of(SegmentTemplate.STRAIGHT, SegmentTemplate.BRIDGE_TUNNEL)) {
+            RouteSegmentPlan plan = new RouteSegmentPlan(
+                    3, SEED, template, List.of(), List.of(MAIN_LINE));
+            assertEquals(MAIN_LINE, plan.mainExit());
+            assertEquals(RouteGeometry.SEGMENT_LENGTH, plan.mainExit().anchorOffset());
+        }
+        RouteSegmentPlan station = new RouteSegmentPlan(
+                3,
+                SEED,
+                SegmentTemplate.STATION,
+                List.of(new RoutePoi(RoutePoiType.STATION, 30)),
+                List.of(MAIN_LINE));
+        assertEquals(RouteGeometry.SEGMENT_LENGTH, station.mainExit().anchorOffset());
+    }
+
+    @Test
+    void loadDropsExitCombinationsThatBreakTheTemplateInvariant() {
+        // CITY_BYPASS without its required branch exit.
+        CompoundTag cityWithoutBranch = validCityTag(5, 24);
+        cityWithoutBranch.put("exits", mainOnlyExitsTag());
+        assertNull(RouteSegmentPlan.load(cityWithoutBranch));
+
+        // STRAIGHT carrying an unexpected branch exit.
+        CompoundTag straightWithBranch = validStraightTag(5);
+        ListTag exits = mainOnlyExitsTag();
+        CompoundTag branch = new CompoundTag();
+        branch.putString("kind", "BRANCH");
+        branch.putInt("anchor", 20);
+        exits.add(branch);
+        straightWithBranch.put("exits", exits);
+        assertNull(RouteSegmentPlan.load(straightWithBranch));
+    }
+
+    @Test
     void loadDropsStructurallyCorruptPlans() {
         // STATION without the required station interest point.
         CompoundTag noPoi = validStationTag(5);
@@ -146,5 +243,15 @@ class RouteSegmentPlanValidationTest {
                 List.of(),
                 List.of(MAIN_LINE))
                 .save();
+    }
+
+    /** An exits list holding only the main-line exit at the segment end. */
+    private static ListTag mainOnlyExitsTag() {
+        ListTag exits = new ListTag();
+        CompoundTag main = new CompoundTag();
+        main.putString("kind", "MAIN_LINE");
+        main.putInt("anchor", RouteGeometry.SEGMENT_LENGTH);
+        exits.add(main);
+        return exits;
     }
 }
