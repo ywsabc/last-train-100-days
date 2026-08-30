@@ -26,6 +26,7 @@ public final class CampaignIntegrityPolicy {
     public static Report audit(CampaignSavedData data) {
         Objects.requireNonNull(data, "data");
         List<Issue> issues = new ArrayList<>();
+        issues.addAll(data.integrityEvents());
 
         ActiveMission active = data.activeMission();
         if (active != null && !active.type().occupiesMainlineSlot()) {
@@ -146,14 +147,22 @@ public final class CampaignIntegrityPolicy {
         ROUTE_AHEAD_OF_GENERATION,
         NON_CONTIGUOUS_ROUTE_PLAN,
         DUPLICATE_CLEANUP,
-        ASSEMBLED_TRAIN_WITHOUT_ID
+        ASSEMBLED_TRAIN_WITHOUT_ID,
+        CORRUPT_SAVE_DATA,
+        TICK_EVALUATION_FAILURE,
+        ENTITY_PERFORMANCE_GUARD
     }
 
     public record Issue(Severity severity, Code code, String detail) {
+        private static final int MAX_DETAIL_LENGTH = 256;
+
         public Issue {
             Objects.requireNonNull(severity, "severity");
             Objects.requireNonNull(code, "code");
             detail = Objects.requireNonNullElse(detail, "");
+            if (detail.length() > MAX_DETAIL_LENGTH) {
+                detail = detail.substring(0, MAX_DETAIL_LENGTH);
+            }
         }
 
     }

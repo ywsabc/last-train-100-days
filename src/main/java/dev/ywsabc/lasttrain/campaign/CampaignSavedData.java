@@ -54,6 +54,7 @@ public final class CampaignSavedData extends SavedData {
     public static final int MAX_OPTIONAL_MISSIONS_ON_LOAD = 8;
     public static final int MAX_PENDING_CLEANUPS = 64;
     public static final int MAX_TEAM_MEMBERS = 128;
+    public static final int MAX_INTEGRITY_EVENTS = 32;
     /** How many segments ahead of the realized head the planner commits. */
     public static final int DEFAULT_ROUTE_PLAN_AHEAD = 8;
     /** Hard deserialization cap for the pending route plan list. */
@@ -83,6 +84,8 @@ public final class CampaignSavedData extends SavedData {
     private RouteSegmentPlanner routePlanner;
     private CampaignMode mode = CampaignMode.STORY_100_DAYS;
     private CampaignStatus status = CampaignStatus.NOT_STARTED;
+    private final Set<SafeModeReason> safeModeReasons = EnumSet.noneOf(SafeModeReason.class);
+    private final List<CampaignIntegrityPolicy.Issue> integrityEvents = new ArrayList<>();
     private int day = 1;
     private int activeTicksIntoDay;
     private long totalActiveTicks;
@@ -149,12 +152,46 @@ public final class CampaignSavedData extends SavedData {
 
     public static CampaignSavedData load(CompoundTag tag, HolderLookup.Provider registries) {
         CampaignSavedData data = new CampaignSavedData();
+        try {
+            int loadedSchema = loadFields(tag, registries, data);
+            data.migrateFinaleState(loadedSchema);
+            if (data.status == CampaignStatus.SAFE_MODE && data.safeModeReasons.isEmpty()) {
+                data.safeModeReasons.add(SafeModeReason.UNKNOWN);
+                data.setDirty();
+            } else if (!data.safeModeReasons.isEmpty()
+                    && data.status == CampaignStatus.RUNNING) {
+                data.status = CampaignStatus.SAFE_MODE;
+                data.setDirty();
+            }
+        } catch (RuntimeException | LinkageError exception) {
+            data.recordCorruptSave(
+                    "load_exception:" + exception.getClass().getSimpleName());
+            data.schemaVersion = CURRENT_SCHEMA;
+            data.status = CampaignStatus.SAFE_MODE;
+            data.safeModeReasons.add(SafeModeReason.SAVE_INTEGRITY);
+            LastTrain.LOGGER.error(
+                    "Campaign save was partially corrupt; safe defaults were retained and the "
+                            + "campaign was parked in SAFE_MODE",
+                    exception);
+        }
+        return data;
+    }
+
+    private static int loadFields(
+            CompoundTag tag,
+            HolderLookup.Provider registries,
+            CampaignSavedData data) {
+        loadPersistedIntegrityEvents(tag, data);
+        validateKnownRootTypes(tag, data);
         data.schemaVersion = tag.contains("schema_version") ? tag.getInt("schema_version") : 1;
         int loadedSchema = data.schemaVersion;
         try {
             data.campaignId = UUID.fromString(tag.getString("campaign_id"));
         } catch (IllegalArgumentException ignored) {
             data.campaignId = UUID.randomUUID();
+            if (tag.contains("campaign_id")) {
+                data.recordCorruptSave("campaign_id:invalid_uuid");
+            }
         }
         data.campaignSeed = tag.getLong("campaign_seed");
         // Route rules version: a save without the key is a pre-planner world
@@ -162,8 +199,22 @@ public final class CampaignSavedData extends SavedData {
         data.routeRulesVersion = tag.contains("route_rules_version")
                 ? Math.max(1, tag.getInt("route_rules_version"))
                 : 1;
-        data.mode = CampaignMode.fromSerializedName(tag.getString("mode"));
-        data.status = CampaignStatus.fromSerializedName(tag.getString("status"));
+        String rawMode = tag.getString("mode");
+        data.mode = CampaignMode.fromSerializedName(rawMode);
+        if (!rawMode.isBlank() && !knownCampaignMode(rawMode)) {
+            data.recordCorruptSave("mode:unknown:" + rawMode);
+        }
+        String rawStatus = tag.getString("status");
+        data.status = CampaignStatus.fromSerializedName(rawStatus);
+        boolean invalidStatus = tag.contains("status")
+                && (!tag.contains("status", Tag.TAG_STRING)
+                        || (!rawStatus.isBlank() && !knownCampaignStatus(rawStatus)));
+        if (invalidStatus) {
+            data.recordCorruptSave("status:unknown:" + rawStatus);
+            data.status = CampaignStatus.SAFE_MODE;
+            data.safeModeReasons.add(SafeModeReason.SAVE_INTEGRITY);
+        }
+        loadSafeModeReasons(tag, data);
         data.day = Math.clamp(tag.getInt("day"), 1, maxDay(data.mode));
         data.activeTicksIntoDay = Math.max(0, tag.getInt("active_ticks_into_day"));
         data.totalActiveTicks = Math.max(0L, tag.getLong("total_active_ticks"));
@@ -172,11 +223,15 @@ public final class CampaignSavedData extends SavedData {
                 Math.clamp(tag.getInt("generated_route_segment"), 0, MAX_ROUTE_SEGMENT);
         data.threat = Math.clamp(tag.getInt("threat"), 0, 100);
         data.missionSequence = Math.max(0L, tag.getLong("mission_sequence"));
-        if (tag.contains("active_mission")) {
-            data.activeMission = ActiveMission.load(tag.getCompound("active_mission"), registries);
+        if (tag.contains("active_mission", Tag.TAG_COMPOUND)) {
+            data.activeMission = loadMissionSafely(
+                    tag.getCompound("active_mission"), registries, data, "active_mission");
         }
         if (tag.contains("active_key_mission")) {
             data.activeKeyMission = parseKeyMission(tag.getString("active_key_mission"));
+            if (data.activeKeyMission == null && !tag.getString("active_key_mission").isBlank()) {
+                data.recordCorruptSave("active_key_mission:unknown_enum");
+            }
         }
         loadKeyMissionSet(tag, "scheduled_key_missions", data.scheduledKeyMissions);
         if (tag.contains("finale_mission_id")) {
@@ -255,8 +310,7 @@ public final class CampaignSavedData extends SavedData {
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         loadOptionalState(tag, registries, data);
         loadRoutePlanState(tag, data);
-        data.migrateFinaleState(loadedSchema);
-        return data;
+        return loadedSchema;
     }
 
     @Override
@@ -267,6 +321,8 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("route_rules_version", routeRulesVersion);
         tag.putString("mode", mode.serializedName());
         tag.putString("status", status.name());
+        tag.put("safe_mode_reasons", saveSafeModeReasons(safeModeReasons));
+        tag.put("integrity_events", saveIntegrityEvents(integrityEvents));
         tag.putInt("day", day);
         tag.putInt("active_ticks_into_day", activeTicksIntoDay);
         tag.putLong("total_active_ticks", totalActiveTicks);
@@ -329,11 +385,16 @@ public final class CampaignSavedData extends SavedData {
             CompoundTag tag,
             HolderLookup.Provider registries,
             CampaignSavedData data) {
-        if (tag.contains("proposed_mission")) {
-            ActiveMission proposed =
-                    ActiveMission.load(tag.getCompound("proposed_mission"), registries);
-            if (proposed.stage() == MissionStage.PROPOSED) {
+        if (tag.contains("proposed_mission", Tag.TAG_COMPOUND)) {
+            ActiveMission proposed = loadMissionSafely(
+                    tag.getCompound("proposed_mission"),
+                    registries,
+                    data,
+                    "proposed_mission");
+            if (proposed != null && proposed.stage() == MissionStage.PROPOSED) {
                 data.proposedMission = proposed;
+            } else if (proposed != null) {
+                data.recordCorruptSave("proposed_mission:invalid_stage");
             }
         }
         ListTag missions = tag.getList("optional_missions", Tag.TAG_COMPOUND);
@@ -350,7 +411,14 @@ public final class CampaignSavedData extends SavedData {
                         MAX_OPTIONAL_MISSIONS_ON_LOAD);
                 break;
             }
-            ActiveMission mission = ActiveMission.load(missions.getCompound(index), registries);
+            ActiveMission mission = loadMissionSafely(
+                    missions.getCompound(index),
+                    registries,
+                    data,
+                    "optional_missions[" + index + "]");
+            if (mission == null) {
+                continue;
+            }
             if (mission.stage().terminal() || mission.stage() == MissionStage.PROPOSED) {
                 // Terminal missions belong to history/cleanup; a PROPOSED
                 // stage in the optional list is corrupt data and is dropped.
@@ -426,6 +494,8 @@ public final class CampaignSavedData extends SavedData {
             RewardReceipt receipt = RewardReceipt.load(receipts.getCompound(index));
             if (receipt != null) {
                 data.putRewardReceipt(receipt);
+            } else {
+                data.recordCorruptSave("reward_receipts[" + index + "]:invalid");
             }
         }
         // Hard deserialization cap: a corrupt save cannot grow the receipt
@@ -452,6 +522,29 @@ public final class CampaignSavedData extends SavedData {
             if (data.status == CampaignStatus.RUNNING) {
                 data.status = CampaignStatus.SAFE_MODE;
             }
+            data.safeModeReasons.add(SafeModeReason.REWARD_OUTBOX_OVERFLOW);
+        }
+    }
+
+    private static ActiveMission loadMissionSafely(
+            CompoundTag tag,
+            HolderLookup.Provider registries,
+            CampaignSavedData data,
+            String path) {
+        if (!tag.contains("id", Tag.TAG_STRING)
+                || !tag.contains("type", Tag.TAG_STRING)
+                || !tag.contains("stage", Tag.TAG_STRING)
+                || MissionType.parse(tag.getString("type")).isEmpty()
+                || !knownMissionStage(tag.getString("stage"))) {
+            data.recordCorruptSave(path + ":invalid_identity_or_enum");
+            return null;
+        }
+        try {
+            UUID.fromString(tag.getString("id"));
+            return ActiveMission.load(tag, registries);
+        } catch (RuntimeException exception) {
+            data.recordCorruptSave(path + ":" + exception.getClass().getSimpleName());
+            return null;
         }
     }
 
@@ -810,6 +903,127 @@ public final class CampaignSavedData extends SavedData {
                 .sorted()
                 .map(StringTag::valueOf)
                 .forEach(entries::add);
+        return entries;
+    }
+
+    private static void validateKnownRootTypes(CompoundTag tag, CampaignSavedData data) {
+        validateTypes(tag, data, Tag.TAG_STRING,
+                "campaign_id", "mode", "status", "active_key_mission",
+                "finale_mission_id", "starter_train_sublevel_id", "captain_id");
+        validateTypes(tag, data, Tag.TAG_COMPOUND,
+                "active_mission", "proposed_mission", "route_plan_state",
+                "pending_team_vote");
+        validateTypes(tag, data, Tag.TAG_LIST,
+                "scheduled_key_missions", "starter_kit_recipients",
+                "starter_gun_recipients", "optional_missions", "reward_receipts",
+                "pending_cleanups", "mission_history", "team_members",
+                "safe_mode_reasons", "integrity_events");
+        validateTypes(tag, data, Tag.TAG_ANY_NUMERIC,
+                "schema_version", "campaign_seed", "route_rules_version", "day",
+                "active_ticks_into_day", "total_active_ticks", "route_segment",
+                "generated_route_segment", "threat", "mission_sequence",
+                "finale_hub_route_segment", "finale_mission_completed",
+                "final_day_elapsed", "starter_station_built", "starter_station_anchor",
+                "starter_train_placed", "starter_train_assembled",
+                "starter_train_assembly_attempts", "rescue_count", "last_rescue_day",
+                "train_missing_ticks", "train_immobile_ticks",
+                "scaling_effective_players", "scaling_pending_players",
+                "scaling_hold_ticks", "attention", "pursuit_distance",
+                "last_pursuit_route_segment", "infection_stage", "infection_ticks",
+                "captain_transfer_tick", "captain_offline_since_tick");
+    }
+
+    private static void validateTypes(
+            CompoundTag tag,
+            CampaignSavedData data,
+            int expectedType,
+            String... keys) {
+        for (String key : keys) {
+            if (tag.contains(key) && !tag.contains(key, expectedType)) {
+                data.recordCorruptSave(key + ":wrong_nbt_type");
+            }
+        }
+    }
+
+    private static boolean knownCampaignMode(String value) {
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        for (CampaignMode candidate : CampaignMode.values()) {
+            if (candidate.serializedName().equals(normalized)
+                    || candidate.name().toLowerCase(java.util.Locale.ROOT).equals(normalized)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean knownCampaignStatus(String value) {
+        for (CampaignStatus candidate : CampaignStatus.values()) {
+            if (candidate.name().equals(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean knownMissionStage(String value) {
+        for (MissionStage candidate : MissionStage.values()) {
+            if (candidate.name().equals(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void loadSafeModeReasons(CompoundTag tag, CampaignSavedData data) {
+        ListTag reasons = tag.getList("safe_mode_reasons", Tag.TAG_STRING);
+        for (int index = 0; index < reasons.size(); index++) {
+            String raw = reasons.getString(index);
+            SafeModeReason.parse(raw).ifPresentOrElse(
+                    data.safeModeReasons::add,
+                    () -> data.recordCorruptSave("safe_mode_reasons:unknown:" + raw));
+        }
+    }
+
+    private static ListTag saveSafeModeReasons(Set<SafeModeReason> reasons) {
+        ListTag entries = new ListTag();
+        reasons.stream()
+                .map(SafeModeReason::serializedName)
+                .sorted()
+                .map(StringTag::valueOf)
+                .forEach(entries::add);
+        return entries;
+    }
+
+    private static void loadPersistedIntegrityEvents(CompoundTag tag, CampaignSavedData data) {
+        ListTag events = tag.getList("integrity_events", Tag.TAG_COMPOUND);
+        for (int index = 0;
+                index < events.size() && data.integrityEvents.size() < MAX_INTEGRITY_EVENTS;
+                index++) {
+            CompoundTag event = events.getCompound(index);
+            try {
+                CampaignIntegrityPolicy.Severity severity =
+                        CampaignIntegrityPolicy.Severity.valueOf(event.getString("severity"));
+                CampaignIntegrityPolicy.Code code =
+                        CampaignIntegrityPolicy.Code.valueOf(event.getString("code"));
+                data.addIntegrityEvent(new CampaignIntegrityPolicy.Issue(
+                        severity,
+                        code,
+                        event.getString("detail")));
+            } catch (IllegalArgumentException ignored) {
+                data.recordCorruptSave("integrity_events[" + index + "]:invalid_enum");
+            }
+        }
+    }
+
+    private static ListTag saveIntegrityEvents(List<CampaignIntegrityPolicy.Issue> events) {
+        ListTag entries = new ListTag();
+        for (CampaignIntegrityPolicy.Issue issue : events) {
+            CompoundTag entry = new CompoundTag();
+            entry.putString("severity", issue.severity().name());
+            entry.putString("code", issue.code().name());
+            entry.putString("detail", issue.detail());
+            entries.add(entry);
+        }
         return entries;
     }
 
@@ -1633,8 +1847,8 @@ public final class CampaignSavedData extends SavedData {
      * Objective completion gate for optional missions: persists the
      * REWARD_PENDING receipt before any world mutation happens, then the
      * reward dispatcher executes the atomic crate fill and flips the receipt
-     * to CLAIMED in the same tick. The receipt alone is the authority over
-     * delivery: CLAIMED is terminal, PENDING retries once per tick.
+     * to CLAIMED in the same tick. The crate marker is the mutation authority;
+     * receipt/marker skew is reconciled on every dispatch tick.
      */
     public boolean completeOptionalMission(UUID id) {
         ActiveMission mission = optionalMission(id).orElse(null);
@@ -1671,6 +1885,16 @@ public final class CampaignSavedData extends SavedData {
             optionalMissions.remove(mission);
             recordMissionOutcome(mission.type(), MissionPoolPolicy.Outcome.COMPLETED);
             queueMissionCleanup(mission);
+        }
+        while (rewardReceipts.size() > RewardOutboxPolicy.MAX_RECEIPTS) {
+            UUID victim = oldestClaimedReceiptId();
+            if (victim == null) {
+                break;
+            }
+            rewardReceipts.remove(victim);
+        }
+        if (rewardReceipts.size() <= RewardOutboxPolicy.MAX_RECEIPTS) {
+            resolveSafeModeReason(SafeModeReason.REWARD_OUTBOX_OVERFLOW);
         }
         setDirty();
         return true;
@@ -2196,14 +2420,13 @@ public final class CampaignSavedData extends SavedData {
                 status);
         TrainRecoveryPolicy.Directive directive = TrainRecoveryPolicy.assess(situation);
 
-        if (directive == TrainRecoveryPolicy.Directive.SAFE_MODE
-                && status == CampaignStatus.RUNNING) {
-            status = CampaignStatus.SAFE_MODE;
-            setDirty();
-        } else if (directive != TrainRecoveryPolicy.Directive.SAFE_MODE
-                && status == CampaignStatus.SAFE_MODE) {
-            status = CampaignStatus.RUNNING;
-            setDirty();
+        if (directive == TrainRecoveryPolicy.Directive.SAFE_MODE) {
+            enterSafeMode(SafeModeReason.VEHICLE_STACK_UNAVAILABLE);
+        } else if (stackLoaded) {
+            // A healthy backend resolves only the reason it owns. Reward
+            // overflow, save-integrity and legacy/unknown reasons remain and
+            // cannot be accidentally cleared by an unrelated train sample.
+            resolveSafeModeReason(SafeModeReason.VEHICLE_STACK_UNAVAILABLE);
         }
 
         if (activePlayers > 0
@@ -2492,6 +2715,71 @@ public final class CampaignSavedData extends SavedData {
         return status;
     }
 
+    public Set<SafeModeReason> safeModeReasons() {
+        return Set.copyOf(safeModeReasons);
+    }
+
+    /** Persisted integrity/performance events exposed by status/validate. */
+    public List<CampaignIntegrityPolicy.Issue> integrityEvents() {
+        return List.copyOf(integrityEvents);
+    }
+
+    public boolean recordIntegrityEvent(
+            CampaignIntegrityPolicy.Severity severity,
+            CampaignIntegrityPolicy.Code code,
+            String detail) {
+        CampaignIntegrityPolicy.Issue issue = new CampaignIntegrityPolicy.Issue(
+                severity,
+                code,
+                detail);
+        if (addIntegrityEvent(issue)) {
+            setDirty();
+            return true;
+        }
+        return false;
+    }
+
+    private void recordCorruptSave(String detail) {
+        if (addIntegrityEvent(new CampaignIntegrityPolicy.Issue(
+                CampaignIntegrityPolicy.Severity.WARNING,
+                CampaignIntegrityPolicy.Code.CORRUPT_SAVE_DATA,
+                detail))) {
+            setDirty();
+        }
+    }
+
+    private boolean addIntegrityEvent(CampaignIntegrityPolicy.Issue issue) {
+        if (integrityEvents.contains(issue)) {
+            return false;
+        }
+        if (integrityEvents.size() >= MAX_INTEGRITY_EVENTS) {
+            integrityEvents.remove(0);
+        }
+        integrityEvents.add(issue);
+        return true;
+    }
+
+    private void enterSafeMode(SafeModeReason reason) {
+        boolean changed = safeModeReasons.add(Objects.requireNonNull(reason, "reason"));
+        if (status == CampaignStatus.RUNNING) {
+            status = CampaignStatus.SAFE_MODE;
+            changed = true;
+        }
+        if (changed) {
+            setDirty();
+        }
+    }
+
+    private void resolveSafeModeReason(SafeModeReason reason) {
+        if (!safeModeReasons.remove(reason)) {
+            return;
+        }
+        if (status == CampaignStatus.SAFE_MODE && safeModeReasons.isEmpty()) {
+            status = CampaignStatus.RUNNING;
+        }
+        setDirty();
+    }
+
     public CampaignMode mode() {
         return mode;
     }
@@ -2644,13 +2932,24 @@ public final class CampaignSavedData extends SavedData {
     /**
      * Durable reward outbox entry. PENDING is persisted before the world
      * mutation runs; the dispatcher flips it to CLAIMED after the atomic
-     * crate fill. The receipt is the sole authority over delivery: a CLAIMED
-     * receipt is never re-granted, whatever the world side looks like.
+     * crate fill. The crate operation marker is the world-mutation authority;
+     * this receipt carries durable intent and acknowledgement so either store
+     * can be reconciled after a crash.
      */
     public record RewardReceipt(
             UUID missionId,
             MissionType type,
             RewardOutboxPolicy.ReceiptState state) {
+        public RewardReceipt {
+            Objects.requireNonNull(missionId, "missionId");
+            Objects.requireNonNull(type, "type");
+            Objects.requireNonNull(state, "state");
+            if (!RewardOutboxPolicy.rewardedOnTurnIn(type)) {
+                throw new IllegalArgumentException(
+                        "Mission type has no outbox reward: " + type);
+            }
+        }
+
         public RewardReceipt claimed() {
             return state == RewardOutboxPolicy.ReceiptState.CLAIMED
                     ? this
@@ -2668,13 +2967,15 @@ public final class CampaignSavedData extends SavedData {
                 return null;
             }
             MissionType type = MissionType.parse(tag.getString("type")).orElse(null);
-            if (type == null) {
+            if (type == null || !RewardOutboxPolicy.rewardedOnTurnIn(type)) {
                 return null;
             }
-            RewardOutboxPolicy.ReceiptState state =
-                    "CLAIMED".equals(tag.getString("state"))
-                            ? RewardOutboxPolicy.ReceiptState.CLAIMED
-                            : RewardOutboxPolicy.ReceiptState.PENDING;
+            RewardOutboxPolicy.ReceiptState state;
+            try {
+                state = RewardOutboxPolicy.ReceiptState.valueOf(tag.getString("state"));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
             return new RewardReceipt(id, type, state);
         }
 

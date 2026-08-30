@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
+import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
 
@@ -237,5 +238,22 @@ class CampaignSavedDataTrainRecoveryTest {
                 data.save(new CompoundTag(), null),
                 null);
         assertEquals(CampaignStatus.SAFE_MODE, loaded.status());
+        assertTrue(loaded.safeModeReasons().contains(
+                SafeModeReason.VEHICLE_STACK_UNAVAILABLE));
+    }
+
+    @Test
+    void legacyUnknownSafeModeReasonCannotBeClearedByHealthyTrainSample() {
+        CompoundTag legacy = new CompoundTag();
+        legacy.putInt("schema_version", CampaignSavedData.CURRENT_SCHEMA);
+        legacy.putString("campaign_id", UUID.randomUUID().toString());
+        legacy.putString("status", CampaignStatus.SAFE_MODE.name());
+        CampaignSavedData loaded = CampaignSavedData.load(legacy, null);
+
+        assertTrue(loaded.safeModeReasons().contains(SafeModeReason.UNKNOWN));
+        loaded.observeTrain(true, true, true, true, false, 1);
+
+        assertEquals(CampaignStatus.SAFE_MODE, loaded.status());
+        assertTrue(loaded.safeModeReasons().contains(SafeModeReason.UNKNOWN));
     }
 }

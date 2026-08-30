@@ -165,6 +165,10 @@ public final class LastTrainCommands {
         context.getSource().sendSuccess(
                 () -> statusMessage(diagnostics),
                 false);
+        CampaignIntegrityPolicy.Report integrity = CampaignIntegrityPolicy.audit(data);
+        if (!integrity.issues().isEmpty()) {
+            sendIntegrityReport(context, integrity);
+        }
         return data.day();
     }
 

@@ -415,6 +415,13 @@ class CampaignSavedDataOptionalMissionTest {
         assertTrue(data.rewardReceipts().stream()
                 .allMatch(receipt -> receipt.state() == RewardOutboxPolicy.ReceiptState.PENDING));
         assertEquals(CampaignStatus.SAFE_MODE, data.status());
+        assertTrue(data.safeModeReasons().contains(SafeModeReason.REWARD_OUTBOX_OVERFLOW));
+
+        // A healthy train observation owns no outbox reason and must not
+        // release this unrelated protection state.
+        data.observeTrain(true, true, true, true, false, 1);
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+        assertTrue(data.safeModeReasons().contains(SafeModeReason.REWARD_OUTBOX_OVERFLOW));
 
         // The flood and the safe state survive a save/load round-trip.
         CampaignSavedData reloaded = CampaignSavedData.load(data.save(new CompoundTag(), null), null);

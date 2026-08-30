@@ -16,6 +16,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -43,6 +44,7 @@ public final class SableTrainTracker {
     private static final String GATHER_X_TAG = "lasttrain_gather_x";
     private static final String GATHER_Y_TAG = "lasttrain_gather_y";
     private static final String GATHER_Z_TAG = "lasttrain_gather_z";
+    private static final double GATHERING_INTEGER_TOLERANCE = 1.0E-7D;
     private static final Set<String> LOGGED_FAILURES = ConcurrentHashMap.newKeySet();
 
     private SableTrainTracker() {
@@ -119,7 +121,7 @@ public final class SableTrainTracker {
             List<Vec3> result = new ArrayList<>(offsets.length);
             for (int[] offset : offsets) {
                 Vec3 local = localCenter.add(offset[0], 0.0D, offset[1]);
-                if (!isSafeGatheringSlot(level, local)) {
+                if (!isSafeGatheringSlot(subLevel, local)) {
                     continue;
                 }
                 transformPosition(subLevel, local, false).ifPresent(result::add);
@@ -369,7 +371,7 @@ public final class SableTrainTracker {
         return rawTag instanceof CompoundTag tag ? tag : null;
     }
 
-    private static Optional<Vec3> transformPosition(
+    static Optional<Vec3> transformPosition(
             Object subLevel,
             Vec3 position,
             boolean inverse) {
@@ -389,17 +391,63 @@ public final class SableTrainTracker {
         }
     }
 
-    private static boolean isSafeGatheringSlot(ServerLevel level, Vec3 localFeet) {
-        // The stored point is at the exact top-center of an oak floor block.
-        // A small positive epsilon avoids flooring a negative integral Y to
-        // the block below because of harmless floating-point roundoff.
-        BlockPos feet = BlockPos.containing(
-                localFeet.x,
-                localFeet.y + 1.0E-4D,
-                localFeet.z);
-        return level.getBlockState(feet.below()).is(Blocks.OAK_PLANKS)
-                && level.getBlockState(feet).isAir()
-                && level.getBlockState(feet.above()).isAir();
+    static boolean isSafeGatheringSlot(Object subLevel, Vec3 plotFeet)
+            throws ReflectiveOperationException {
+        // pose.transformPositionInverse returns an absolute coordinate in
+        // Sable's hidden plot. EmbeddedPlotLevelAccessor instead accepts a
+        // coordinate relative to the plot center and performs the hidden
+        // parent-world offset itself.
+        Object plot = subLevel.getClass().getMethod("getPlot").invoke(subLevel);
+        Object rawCenter = plot.getClass().getMethod("getCenterBlock").invoke(plot);
+        if (!(rawCenter instanceof BlockPos plotCenter)) {
+            throw new IllegalStateException("Sable plot center is not a BlockPos");
+        }
+        Object accessor = plot.getClass()
+                .getMethod("getEmbeddedLevelAccessor")
+                .invoke(plot);
+        Method getBlockState = accessor.getClass().getMethod("getBlockState", BlockPos.class);
+        BlockPos feet = embeddedPlotPosition(plotCenter, gatheringFeetBlock(plotFeet));
+        Object rawFloor = getBlockState.invoke(accessor, feet.below());
+        Object rawFeet = getBlockState.invoke(accessor, feet);
+        Object rawHead = getBlockState.invoke(accessor, feet.above());
+        if (!(rawFloor instanceof BlockState floor)
+                || !(rawFeet instanceof BlockState feetState)
+                || !(rawHead instanceof BlockState headState)) {
+            throw new IllegalStateException("Sable plot accessor returned a non-block state");
+        }
+        return safeGatheringStates(
+                floor.is(Blocks.OAK_PLANKS),
+                feetState.isAir(),
+                headState.isAir());
+    }
+
+    static boolean safeGatheringStates(
+            boolean oakFloor,
+            boolean feetAir,
+            boolean headAir) {
+        return oakFloor && feetAir && headAir;
+    }
+
+    static BlockPos gatheringFeetBlock(Vec3 plotFeet) {
+        int stableY = stableIntegralFloor(plotFeet.y);
+        return BlockPos.containing(plotFeet.x, stableY, plotFeet.z);
+    }
+
+    static BlockPos embeddedPlotPosition(BlockPos plotCenter, BlockPos plotAbsolute) {
+        return new BlockPos(
+                plotAbsolute.getX() - plotCenter.getX(),
+                plotAbsolute.getY() - plotCenter.getY(),
+                plotAbsolute.getZ() - plotCenter.getZ());
+    }
+
+    private static int stableIntegralFloor(double value) {
+        double nearestInteger = Math.rint(value);
+        if (Math.abs(value - nearestInteger) <= GATHERING_INTEGER_TOLERANCE
+                && nearestInteger >= Integer.MIN_VALUE
+                && nearestInteger <= Integer.MAX_VALUE) {
+            return (int) nearestInteger;
+        }
+        return (int) Math.floor(value);
     }
 
     private static boolean finite(Vec3 position) {

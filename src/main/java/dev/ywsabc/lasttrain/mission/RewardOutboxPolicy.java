@@ -10,38 +10,28 @@ import java.util.UUID;
 /**
  * Durable reward outbox policy for mission completion rewards.
  *
- * <p>The persisted saved data is the sole authority over reward delivery.
- * The decision table is deliberately simple:</p>
+ * <p>The operation marker stored on the same block entity as the reward
+ * items is the authority over the world mutation. The saved-data receipt is
+ * the durable intent/acknowledgement side of the outbox. Reconciliation uses
+ * both stores:</p>
  * <ul>
- * <li>{@link ReceiptState#PENDING} → {@link GrantDecision#GRANT_AND_CLAIM}:
- * one dispatch attempt per tick, no matter what the world side looks like;</li>
- * <li>{@link ReceiptState#CLAIMED} → {@link GrantDecision#NO_OP} forever. A
- * broken, looted, rolled-back or otherwise missing crate is never restocked
- * and never re-read for a decision — the receipt alone ends the grant.</li>
+ * <li>marker present + PENDING receipt → {@link GrantDecision#CLAIM_ONLY};</li>
+ * <li>marker absent (PENDING or CLAIMED) →
+ * {@link GrantDecision#GRANT_AND_CLAIM};</li>
+ * <li>marker present + CLAIMED receipt → {@link GrantDecision#NO_OP}.</li>
  * </ul>
- * A successful dispatch writes the whole payload into the crate, persists the
- * diagnostic operation marker and flips the receipt to CLAIMED in the same
- * tick. Any failure (crate full, space insufficient, chunk unloaded) leaves
- * the receipt PENDING and the next tick retries. The only accepted crash
- * trade-off: if the crate chunk save is lost after the receipt turned
- * CLAIMED, the reward is lost but never duplicated — the saved data wins over
- * the world.
+ * A successful dispatch writes the whole payload and marker to one block
+ * entity before flipping the receipt to CLAIMED. If either storage is ahead
+ * after a crash, the next scan therefore closes the gap without duplicating
+ * or losing the payload.
  *
  * <p>Each grant attempt is atomic per receipt: the exact payload either lands
  * in full or is deferred in full, so a failed attempt can never leave a
- * partial reward behind. Existing matching crate contents may be merge
- * targets, but never count as proof that part of this receipt was already
- * delivered. Receipts are independent: one receipt always submits its own
- * complete payload against the crate as it stands (including earlier
- * receipts' committed writes of the same round), and its success or deferral
- * never influences another receipt's decision. Because a receipt only ever
- * flips PENDING → CLAIMED once and CLAIMED never dispatches again, every
- * receipt is delivered at most once during normal dispatch.</p>
+ * partial reward behind. Existing matching crate contents alone never count
+ * as proof of delivery; only the stable operation marker does. Receipts are
+ * independent and every operation id can mutate the crate at most once.</p>
  *
- * <p>The crate marker is kept per mission for diagnostics only: it records
- * which missions touched the shared crate, and a missing marker on a CLAIMED
- * receipt explains a lost crate in the logs. Markers never participate in
- * the grant decision. Receipts and crate markers are capped at
+ * <p>Receipts and crate markers are capped at
  * {@link #MAX_RECEIPTS} / {@link #MAX_MARKERS}; eviction only ever drops
  * CLAIMED history first, and a crate marker eviction always pairs with its
  * CLAIMED receipt so neither side can outlive the other.</p>
@@ -68,6 +58,7 @@ public final class RewardOutboxPolicy {
 
     public enum GrantDecision {
         GRANT_AND_CLAIM,
+        CLAIM_ONLY,
         NO_OP
     }
 
@@ -147,18 +138,15 @@ public final class RewardOutboxPolicy {
         return OPERATION_PREFIX + missionId + OPERATION_SUFFIX;
     }
 
-    /**
-     * The grant decision table. The saved data is the sole authority:
-     * PENDING always means "try one atomic dispatch", CLAIMED always means
-     * "never dispatch again". The world side — crate, marker, items — never
-     * influences the decision.
-     */
-    public static GrantDecision reconcile(ReceiptState state) {
+    /** Crash-consistent decision across the receipt and crate stores. */
+    public static GrantDecision reconcile(ReceiptState state, boolean operationApplied) {
         Objects.requireNonNull(state, "state");
-        return switch (state) {
-            case PENDING -> GrantDecision.GRANT_AND_CLAIM;
-            case CLAIMED -> GrantDecision.NO_OP;
-        };
+        if (!operationApplied) {
+            return GrantDecision.GRANT_AND_CLAIM;
+        }
+        return state == ReceiptState.PENDING
+                ? GrantDecision.CLAIM_ONLY
+                : GrantDecision.NO_OP;
     }
 
     /**
@@ -230,7 +218,7 @@ public final class RewardOutboxPolicy {
     /**
      * Applies one grant decision. {@link GrantDecision#GRANT_AND_CLAIM} fills
      * the whole payload atomically and reports claimable only after the crate
-     * holds it and the diagnostic marker was written; {@link GrantDecision#NO_OP}
+     * holds it and the operation marker was written; {@link GrantDecision#NO_OP}
      * touches nothing.
      *
      * @param crate crate access, required only for GRANT_AND_CLAIM
@@ -244,16 +232,17 @@ public final class RewardOutboxPolicy {
         Objects.requireNonNull(decision, "decision");
         return switch (decision) {
             case GRANT_AND_CLAIM -> fillCrate(crate, operationId, payload);
+            case CLAIM_ONLY -> true;
             case NO_OP -> false;
         };
     }
 
     /**
      * Atomic all-or-nothing grant of one receipt: the exact payload is
-     * submitted on every PENDING attempt and either lands in full or, when
-     * the crate cannot hold it, leaves the crate untouched. Existing matching
-     * contents and diagnostic markers never reduce or suppress the batch. On
-     * success the diagnostic marker is persisted before the receipt flips.
+     * submitted only when its marker is absent and either lands in full or,
+     * when the crate cannot hold it, leaves the crate untouched. A matching
+     * marker proves the operation already landed and suppresses every replay.
+     * On success the marker is persisted before the receipt flips.
      *
      * @return true when the crate now holds the payload and the marker was
      *     written; false leaves the crate untouched
@@ -262,6 +251,9 @@ public final class RewardOutboxPolicy {
         Objects.requireNonNull(crate, "crate");
         Objects.requireNonNull(operationId, "operationId");
         Objects.requireNonNull(payload, "payload");
+        if (crate.operationIds().contains(operationId)) {
+            return true;
+        }
         if (!crate.addAll(payload)) {
             return false;
         }

@@ -1,10 +1,13 @@
 package dev.ywsabc.lasttrain.mission;
 
 import dev.ywsabc.lasttrain.LastTrain;
+import dev.ywsabc.lasttrain.campaign.CampaignIntegrityPolicy;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
+import dev.ywsabc.lasttrain.campaign.SafeModeReason;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
+import dev.ywsabc.lasttrain.server.CampaignTickGuard;
 import dev.ywsabc.lasttrain.server.SableTrainTracker;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -20,9 +23,9 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.npc.Villager;
+import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -55,23 +58,33 @@ public final class OptionalMissionDirector {
     private static final double SAFE_RADIUS = 5.0D;
     private static final double SAFE_RADIUS_SQUARED = SAFE_RADIUS * SAFE_RADIUS;
 
-    /** One-shot diagnostic log keys for CLAIMED receipts whose crate marker is gone. */
-    private static final Set<String> missingMarkerDiagnostics = new HashSet<>();
-
     private OptionalMissionDirector() {
     }
 
     public static void tick(MinecraftServer server, CampaignSavedData data) {
-        int timedOut = data.settleOptionalTimeouts();
+        int timedOut = CampaignTickGuard.call(
+                data,
+                "mission.optional_timeouts",
+                data::settleOptionalTimeouts,
+                0);
         if (timedOut > 0) {
             server.getPlayerList().broadcastSystemMessage(
                     Component.translatable("message.lasttrain.optional_timed_out", timedOut),
                     false);
         }
-        dispatchPendingRewards(server.overworld(), data);
-        processPendingCleanups(server.overworld(), data);
+        CampaignTickGuard.run(
+                data,
+                "mission.reward_outbox",
+                () -> dispatchPendingRewards(server.overworld(), data));
+        CampaignTickGuard.run(
+                data,
+                "mission.optional_cleanup",
+                () -> processPendingCleanups(server.overworld(), data));
         for (ActiveMission mission : data.optionalMissions()) {
-            tickMission(server, data, mission);
+            CampaignTickGuard.run(
+                    data,
+                    "mission.optional." + mission.id(),
+                    () -> tickMission(server, data, mission));
         }
     }
 
@@ -101,6 +114,11 @@ public final class OptionalMissionDirector {
                     if (mission == null) {
                         return;
                     }
+                }
+                if (mission.type() == MissionType.RESCUE_SURVIVOR
+                        && !ZombieBlockadePolicy.shouldScan(
+                                mission.id(), server.getTickCount() / 10)) {
+                    return;
                 }
                 observe(server.overworld(), data, mission);
                 ActiveMission refreshed = data.optionalMission(mission.id()).orElse(null);
@@ -305,14 +323,21 @@ public final class OptionalMissionDirector {
     }
 
     private static Villager findSurvivor(ServerLevel level, String tag) {
-        for (Entity entity : level.getAllEntities()) {
-            if (entity instanceof Villager villager
-                    && !villager.isRemoved()
-                    && villager.getTags().contains(tag)) {
-                return villager;
-            }
-        }
-        return null;
+        List<Villager> matches = findSurvivors(level, tag, 1);
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    private static List<Villager> findSurvivors(
+            ServerLevel level,
+            String tag,
+            int limit) {
+        List<Villager> matches = new ArrayList<>();
+        level.getEntities(
+                EntityTypeTest.forClass(Villager.class),
+                villager -> !villager.isRemoved() && villager.getTags().contains(tag),
+                matches,
+                limit);
+        return matches;
     }
 
     private static boolean spawnSurvivor(ServerLevel level, ActiveMission mission, String tag) {
@@ -366,27 +391,16 @@ public final class OptionalMissionDirector {
 
     private static void dispatchPendingRewards(ServerLevel level, CampaignSavedData data) {
         if (data.status() == CampaignStatus.SAFE_MODE) {
-            // SAFE_MODE pauses world side effects; the outbox resumes as soon
-            // as the campaign leaves the safe state.
-            return;
+            // An outbox-overflow reason can only heal by draining its pending
+            // receipts. Every other SAFE_MODE owner still pauses world writes.
+            if (!data.safeModeReasons().equals(Set.of(SafeModeReason.REWARD_OUTBOX_OVERFLOW))) {
+                return;
+            }
         }
         BlockPos cratePos = rewardCratePos(data);
         boolean chunkLoaded = level.hasChunkAt(cratePos);
         for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
             String operationId = RewardOutboxPolicy.operationId(receipt.missionId());
-            if (receipt.state() == RewardOutboxPolicy.ReceiptState.CLAIMED) {
-                // The saved data is the sole authority: CLAIMED is terminal
-                // no matter what the crate, marker or items look like. The
-                // marker read below is diagnostics only — it explains a lost
-                // crate in the logs, never re-opens the grant.
-                if (chunkLoaded) {
-                    logMissingMarkerDiagnostic(level, data, cratePos, operationId);
-                }
-                continue;
-            }
-            // PENDING: exactly one atomic dispatch attempt per tick. Any
-            // failure — chunk unloaded, crate blocked, space insufficient —
-            // keeps the receipt PENDING for the next tick's retry.
             if (!chunkLoaded) {
                 continue;
             }
@@ -394,13 +408,19 @@ public final class OptionalMissionDirector {
             if (chest == null) {
                 continue;
             }
+            ChestCrateAccess crate = new ChestCrateAccess(chest);
+            boolean operationApplied = crate.operationIds().contains(operationId);
+            RewardOutboxPolicy.GrantDecision decision = RewardOutboxPolicy.reconcile(
+                    receipt.state(), operationApplied);
             if (RewardOutboxPolicy.settle(
-                            RewardOutboxPolicy.reconcile(RewardOutboxPolicy.ReceiptState.PENDING),
-                            new ChestCrateAccess(chest),
+                            decision,
+                            crate,
                             operationId,
                             RewardOutboxPolicy.payload(receipt.type(), receipt.missionId()))
                     && data.markRewardClaimed(receipt.missionId())) {
-                broadcastRewardDelivered(level);
+                if (decision == RewardOutboxPolicy.GrantDecision.GRANT_AND_CLAIM) {
+                    broadcastRewardDelivered(level);
+                }
             }
         }
         if (chunkLoaded) {
@@ -409,40 +429,6 @@ public final class OptionalMissionDirector {
                 capCrateMarkers(new ChestCrateAccess(chest), data);
             }
         }
-    }
-
-    /**
-     * Logs once per mission when a CLAIMED receipt has no crate marker: the
-     * crate chunk was lost, broken or rolled back and — by design — the
-     * reward is accepted as lost instead of being re-granted. The one-shot
-     * set is pruned against the live receipts so it stays bounded.
-     */
-    private static void logMissingMarkerDiagnostic(
-            ServerLevel level,
-            CampaignSavedData data,
-            BlockPos cratePos,
-            String operationId) {
-        if (missingMarkerDiagnostics.contains(operationId)) {
-            return;
-        }
-        BlockEntity blockEntity = level.getBlockEntity(cratePos);
-        if (blockEntity instanceof ChestBlockEntity chest
-                && crateMarkers(chest.getPersistentData()).contains(operationId)) {
-            return;
-        }
-        if (missingMarkerDiagnostics.size() >= RewardOutboxPolicy.MAX_MARKERS) {
-            Set<String> liveOperations = new HashSet<>();
-            for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
-                liveOperations.add(RewardOutboxPolicy.operationId(receipt.missionId()));
-            }
-            missingMarkerDiagnostics.retainAll(liveOperations);
-        }
-        missingMarkerDiagnostics.add(operationId);
-        LastTrain.LOGGER.warn(
-                "CLAIMED reward receipt {} has no crate marker; the crate was lost, broken or "
-                        + "rolled back and the reward is NOT re-granted (saved data is the "
-                        + "sole authority over delivery)",
-                operationId);
     }
 
     private static void broadcastRewardDelivered(ServerLevel level) {
@@ -721,13 +707,21 @@ public final class OptionalMissionDirector {
             if (site == null || !level.hasChunkAt(site)) {
                 continue;
             }
-            clearOptionalSite(level, cleanup);
-            data.completePendingCleanup(cleanup.missionId());
+            if (clearOptionalSite(level, cleanup)) {
+                data.completePendingCleanup(cleanup.missionId());
+            } else {
+                data.recordIntegrityEvent(
+                        CampaignIntegrityPolicy.Severity.WARNING,
+                        CampaignIntegrityPolicy.Code.ENTITY_PERFORMANCE_GUARD,
+                        "optional_cleanup_scan_budget:" + cleanup.missionId());
+            }
         }
     }
 
     /** Idempotent: only mission-owned blocks and entities are removed. */
-    private static void clearOptionalSite(ServerLevel level, CampaignSavedData.PendingSiteCleanup cleanup) {
+    private static boolean clearOptionalSite(
+            ServerLevel level,
+            CampaignSavedData.PendingSiteCleanup cleanup) {
         BlockPos site = cleanup.site();
         switch (cleanup.type()) {
             case SALVAGE_CAR -> {
@@ -748,15 +742,18 @@ public final class OptionalMissionDirector {
             }
             case RESCUE_SURVIVOR -> {
                 String tag = MissionWorldDirector.survivorEntityTag(cleanup.missionId());
-                for (Entity entity : level.getAllEntities()) {
-                    if (entity instanceof Villager survivor
-                            && survivor.getTags().contains(tag)) {
-                        survivor.discard();
-                    }
+                List<Villager> survivors = findSurvivors(
+                        level,
+                        tag,
+                        ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+                survivors.forEach(Villager::discard);
+                if (survivors.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
+                    return false;
                 }
             }
             default -> {
             }
         }
+        return true;
     }
 }

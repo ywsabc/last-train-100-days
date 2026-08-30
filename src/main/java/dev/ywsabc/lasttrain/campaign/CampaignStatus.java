@@ -4,9 +4,9 @@ public enum CampaignStatus {
     NOT_STARTED,
     RUNNING,
     /**
-     * The vehicle stack is missing or the train cannot be verified. The
-     * campaign clock and world side effects pause until the backend is
-     * available again.
+     * One or more persisted {@link SafeModeReason}s currently prevent safe
+     * world mutation. The campaign clock and world side effects pause until
+     * every owning condition is explicitly resolved.
      */
     SAFE_MODE,
     COMPLETED,

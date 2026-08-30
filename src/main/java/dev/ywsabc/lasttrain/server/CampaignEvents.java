@@ -53,7 +53,11 @@ public final class CampaignEvents {
     public static void onServerTick(ServerTickEvent.Post event) {
         MinecraftServer server = event.getServer();
         CampaignSavedData data = CampaignSavedData.get(server);
-        SimurailTrainBootstrap.tick(server.overworld(), data, server.getTickCount());
+        CampaignTickGuard.run(
+                data,
+                "campaign.simurail",
+                () -> SimurailTrainBootstrap.tick(
+                        server.overworld(), data, server.getTickCount()));
 
         int activePlayers = (int) server.getPlayerList().getPlayers().stream()
                 .filter(player -> !player.isSpectator())
@@ -63,9 +67,18 @@ public final class CampaignEvents {
                 ? null
                 : server.getPlayerList().getPlayer(data.captainId());
         boolean captainOnline = captain != null && !captain.isSpectator();
-        data.observeCaptainOnline(captainOnline, logicalTick);
-        data.expirePendingVote(logicalTick);
-        observeTrainRecovery(server, data, activePlayers);
+        CampaignTickGuard.run(
+                data,
+                "campaign.captain",
+                () -> data.observeCaptainOnline(captainOnline, logicalTick));
+        CampaignTickGuard.run(
+                data,
+                "campaign.vote",
+                () -> data.expirePendingVote(logicalTick));
+        CampaignTickGuard.run(
+                data,
+                "campaign.train_recovery",
+                () -> observeTrainRecovery(server, data, activePlayers));
         if (!ServerActivityPolicy.shouldRunCampaignWorldDirectors(activePlayers)) {
             return;
         }
@@ -73,35 +86,33 @@ public final class CampaignEvents {
         // 路线落块、任务实体、奖励箱与清理队列都属于世界副作用；无人在线时
         // 整体暂停，避免专服空转期间悄悄改变现场。载具恢复探测仍在上方执行，
         // 以便依赖丢失能及时进入 SAFE_MODE。
-        RouteDirector.tick(server, data, server.getTickCount());
-        MissionWorldDirector.tick(server, data, server.getTickCount());
+        CampaignTickGuard.run(
+                data,
+                "campaign.route_director",
+                () -> RouteDirector.tick(server, data, server.getTickCount()));
+        CampaignTickGuard.run(
+                data,
+                "campaign.mission_director",
+                () -> MissionWorldDirector.tick(server, data, server.getTickCount()));
 
         if (data.status() == CampaignStatus.NOT_STARTED) {
-            UUID trainId = data.starterTrainSublevelId();
-            boolean trainLocated = trainId != null
-                    && SableTrainTracker.position(server.overworld(), trainId).isPresent();
-            UUID firstStarter = server.getPlayerList().getPlayers().stream()
-                    .filter(player -> !player.isSpectator())
-                    .map(player -> player.getUUID())
-                    .findFirst()
-                    .orElse(null);
-            if (firstStarter != null
-                    && CampaignStartPolicy.shouldAutoStart(
-                            activePlayers > 0,
-                            data.starterStationBuilt(),
-                            data.starterTrainAssembled(),
-                            trainId != null,
-                            trainLocated)
-                    && data.start(firstStarter)) {
-                IntegrationBridge.syncCampaignNumbers(server, data);
-                broadcast(server, Component.translatable("message.lasttrain.campaign_started"));
-            }
+            CampaignTickGuard.run(
+                    data,
+                    "campaign.auto_start",
+                    () -> tryAutoStart(server, data, activePlayers));
         }
 
-        CampaignSavedData.TickOutcome outcome = data.tick(activePlayers);
+        CampaignSavedData.TickOutcome outcome = CampaignTickGuard.call(
+                data,
+                "campaign.saved_data_tick",
+                () -> data.tick(activePlayers),
+                CampaignSavedData.TickOutcome.NONE);
         if (outcome != CampaignSavedData.TickOutcome.NONE
                 || server.getTickCount() % 200 == 0) {
-            IntegrationBridge.syncCampaignNumbers(server, data);
+            CampaignTickGuard.run(
+                    data,
+                    "campaign.integration_sync",
+                    () -> IntegrationBridge.syncCampaignNumbers(server, data));
         }
         switch (outcome) {
             case DAY_ADVANCED -> broadcast(server, Component.translatable("message.lasttrain.day_advanced", data.day()));
@@ -121,6 +132,31 @@ public final class CampaignEvents {
                     broadcast(server, Component.translatable("message.lasttrain.campaign_completed"));
             case NONE -> {
             }
+        }
+    }
+
+    private static void tryAutoStart(
+            MinecraftServer server,
+            CampaignSavedData data,
+            int activePlayers) {
+        UUID trainId = data.starterTrainSublevelId();
+        boolean trainLocated = trainId != null
+                && SableTrainTracker.position(server.overworld(), trainId).isPresent();
+        UUID firstStarter = server.getPlayerList().getPlayers().stream()
+                .filter(player -> !player.isSpectator())
+                .map(player -> player.getUUID())
+                .findFirst()
+                .orElse(null);
+        if (firstStarter != null
+                && CampaignStartPolicy.shouldAutoStart(
+                        activePlayers > 0,
+                        data.starterStationBuilt(),
+                        data.starterTrainAssembled(),
+                        trainId != null,
+                        trainLocated)
+                && data.start(firstStarter)) {
+            IntegrationBridge.syncCampaignNumbers(server, data);
+            broadcast(server, Component.translatable("message.lasttrain.campaign_started"));
         }
     }
 

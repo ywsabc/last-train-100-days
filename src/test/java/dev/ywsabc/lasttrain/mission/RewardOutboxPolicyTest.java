@@ -36,12 +36,19 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
-    void decisionTableDependsOnlyOnTheSavedData() {
-        // The world side — marker, crate, items — never influences the
-        // decision: PENDING always means one dispatch attempt per tick,
-        // CLAIMED always means never again.
-        assertEquals(GrantDecision.GRANT_AND_CLAIM, RewardOutboxPolicy.reconcile(ReceiptState.PENDING));
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+    void reconciliationUsesTheCrateOperationAsWorldMutationAuthority() {
+        assertEquals(
+                GrantDecision.GRANT_AND_CLAIM,
+                RewardOutboxPolicy.reconcile(ReceiptState.PENDING, false));
+        assertEquals(
+                GrantDecision.CLAIM_ONLY,
+                RewardOutboxPolicy.reconcile(ReceiptState.PENDING, true));
+        assertEquals(
+                GrantDecision.GRANT_AND_CLAIM,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, false));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
     }
 
     @Test
@@ -67,25 +74,25 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
-    void claimedReceiptIsNeverRegrantedForAnyWorldState() {
+    void claimedReceiptWithAppliedOperationIsNeverRegranted() {
         UUID missionId = UUID.randomUUID();
         String operationId = RewardOutboxPolicy.operationId(missionId);
         List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
         FakeCrate crate = new FakeCrate();
         assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
 
-        // The crate is broken and the player took every item: whatever the
-        // world side looks like, a CLAIMED receipt is terminal.
+        // Looting does not remove the marker stored on the same block entity.
         crate.slots.clear();
-        crate.markers.clear();
         crate.resetAccessCalls();
 
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
         assertFalse(RewardOutboxPolicy.settle(
                 GrantDecision.NO_OP, crate, operationId, payload));
         assertEquals(0, crate.accessCalls, "the NO_OP path never touches the crate");
         assertTrue(crate.slots.isEmpty());
-        assertTrue(crate.markers.isEmpty());
+        assertEquals(List.of(operationId), crate.markers);
     }
 
     @Test
@@ -130,7 +137,9 @@ class RewardOutboxPolicyTest {
         crate.refuseAdds = false;
         assertTrue(RewardOutboxPolicy.fillCrate(crate, marker, payload));
         assertTrue(crate.operationIds().contains(marker));
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
         assertEquals(
                 8,
                 RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:bread", 8)));
@@ -151,23 +160,25 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
-    void chunkLostAfterClaimIsAcceptedAsLostAndNeverDuplicated() {
+    void savedDataAheadOfCrateReplaysClaimedReceiptExactlyOnce() {
         UUID missionId = UUID.randomUUID();
         String operationId = RewardOutboxPolicy.operationId(missionId);
         List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
 
-        FakeCrate first = new FakeCrate();
-        RewardOutboxPolicy.fillCrate(first, operationId, payload);
-
-        // The crate chunk save was lost after the receipt turned CLAIMED: the
-        // reward may be gone, but it must never be re-granted (saved data is
-        // the sole authority; loss is preferred over duplication).
+        // SavedData persisted CLAIMED while the crate block entity rolled
+        // back. The missing marker proves the world mutation did not persist.
         FakeCrate repaired = new FakeCrate();
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
-        assertFalse(RewardOutboxPolicy.settle(
-                GrantDecision.NO_OP, repaired, operationId, payload));
-        assertTrue(repaired.contents().isEmpty());
-        assertTrue(repaired.operationIds().isEmpty());
+        GrantDecision replay = RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, false);
+        assertEquals(GrantDecision.GRANT_AND_CLAIM, replay);
+        assertTrue(RewardOutboxPolicy.settle(replay, repaired, operationId, payload));
+        assertTrue(RewardOutboxPolicy.containsPayload(repaired.contents(), payload));
+        assertEquals(List.of(operationId), repaired.operationIds());
+
+        // A repeated tick sees the marker and cannot append the payload again.
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
+        assertEquals(1, repaired.addAllCalls);
     }
 
     @Test
@@ -220,28 +231,54 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
-    void diagnosticMarkerDoesNotSuppressTheWholePendingPayload() {
+    void worldAheadOfSavedDataClaimsPendingReceiptWithoutDuplicatingPayload() {
         UUID missionId = UUID.randomUUID();
         String operationId = RewardOutboxPolicy.operationId(missionId);
         List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
 
         FakeCrate crate = new FakeCrate();
+        payload.forEach(crate::addStack);
         crate.addOperationMarker(operationId);
-        // An older run landed only the first entry.
-        crate.addStack(payload.get(0));
+        crate.resetAccessCalls();
 
-        assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
+        GrantDecision decision = RewardOutboxPolicy.reconcile(ReceiptState.PENDING, true);
+        assertEquals(GrantDecision.CLAIM_ONLY, decision);
+        assertTrue(RewardOutboxPolicy.settle(decision, crate, operationId, payload));
         assertTrue(RewardOutboxPolicy.containsPayload(crate.contents(), payload));
-        // The marker and matching contents are diagnostics/world state only;
-        // neither can turn the PENDING grant into a shortfall top-up.
         assertEquals(
-                16,
+                8,
                 crate.contents().stream()
                         .filter(item -> item.itemId().equals("minecraft:bread"))
                         .mapToInt(RewardItem::count)
                         .sum());
-        assertEquals(payload, crate.addedBatches.get(0));
+        assertEquals(0, crate.addAllCalls);
         assertEquals(List.of(operationId), crate.operationIds());
+    }
+
+    @Test
+    void crashBetweenCrateWriteAndReceiptAckIsIdempotentAcrossRepeatedTicks() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        List<RewardItem> payload = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
+        FakeCrate crate = new FakeCrate();
+
+        // Tick 1 lands world state, then the process crashes before ACK.
+        assertTrue(RewardOutboxPolicy.fillCrate(crate, operationId, payload));
+        assertEquals(1, crate.addAllCalls);
+
+        // Reloaded receipt is still PENDING. Both recovery ticks only ACK.
+        for (int tick = 0; tick < 2; tick++) {
+            GrantDecision decision = RewardOutboxPolicy.reconcile(
+                    ReceiptState.PENDING,
+                    crate.operationIds().contains(operationId));
+            assertEquals(GrantDecision.CLAIM_ONLY, decision);
+            assertTrue(RewardOutboxPolicy.settle(decision, crate, operationId, payload));
+        }
+        assertEquals(1, crate.addAllCalls);
+        assertEquals(
+                8,
+                RewardOutboxPolicy.countPresent(
+                        crate.contents(), RewardItem.item("minecraft:bread", 1)));
     }
 
     @Test
@@ -296,7 +333,9 @@ class RewardOutboxPolicyTest {
         // Both receipts are CLAIMED now: every later round is NO_OP and the
         // exact payload counts survive any number of rounds.
         for (int round = 0; round < 3; round++) {
-            assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+            assertEquals(
+                    GrantDecision.NO_OP,
+                    RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
             assertFalse(RewardOutboxPolicy.settle(GrantDecision.NO_OP, crate, rescueMarker, rescuePayload));
             assertFalse(RewardOutboxPolicy.settle(GrantDecision.NO_OP, crate, salvageMarker, salvagePayload));
         }
@@ -372,7 +411,9 @@ class RewardOutboxPolicyTest {
                 8,
                 RewardOutboxPolicy.countPresent(crate.contents(), RewardItem.item("minecraft:iron_ingot", 1)));
         assertEquals(2, crate.operationIds().size());
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
     }
 
     @Test
@@ -385,7 +426,9 @@ class RewardOutboxPolicyTest {
         // The player took every item; only the marker remains.
         crate.slots.clear();
 
-        assertEquals(GrantDecision.NO_OP, RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED));
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, true));
         assertFalse(RewardOutboxPolicy.settle(GrantDecision.NO_OP, crate, marker, payload));
         assertTrue(crate.contents().isEmpty());
         assertTrue(crate.operationIds().contains(marker));
@@ -454,7 +497,9 @@ class RewardOutboxPolicyTest {
     /** One dispatch decision + settle round, mirroring the director loop. */
     private static boolean dispatch(FakeCrate crate, UUID missionId, MissionType type) {
         return RewardOutboxPolicy.settle(
-                RewardOutboxPolicy.reconcile(ReceiptState.PENDING),
+                RewardOutboxPolicy.reconcile(
+                        ReceiptState.PENDING,
+                        crate.operationIds().contains(RewardOutboxPolicy.operationId(missionId))),
                 crate,
                 RewardOutboxPolicy.operationId(missionId),
                 RewardOutboxPolicy.payload(type, missionId));

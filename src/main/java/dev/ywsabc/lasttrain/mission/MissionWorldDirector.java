@@ -2,6 +2,7 @@ package dev.ywsabc.lasttrain.mission;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.campaign.CampaignIntegrityPolicy;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.route.RouteTrackStates;
@@ -21,6 +22,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -28,6 +30,8 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Materializes mission state into ordinary server-authoritative world
@@ -122,8 +126,10 @@ public final class MissionWorldDirector {
         // Reconciliation is deliberately periodic: it repairs entity/save
         // skew quickly without scanning every loaded entity twenty times per
         // second for the whole duration of a blockade.
-        if (canReconcileZombieBlockade(server, data, mission)) {
-            reconcileZombieBlockade(server.overworld(), mission);
+        if (canReconcileZombieBlockade(server, data, mission)
+                && ZombieBlockadePolicy.shouldScan(
+                        mission.id(), serverTick / TICK_INTERVAL)) {
+            reconcileZombieBlockade(server.overworld(), data, mission);
         }
 
         if (mission.site() == null) {
@@ -145,7 +151,7 @@ public final class MissionWorldDirector {
         }
 
         if (!mission.worldPrepared()) {
-            if (!prepare(server.overworld(), mission)) {
+            if (!prepare(server.overworld(), data, mission)) {
                 return;
             }
             data.markMissionWorldPrepared();
@@ -196,7 +202,10 @@ public final class MissionWorldDirector {
         return !FaultInjection.shouldFail(FaultInjection.FailurePoint.MISSION_WORLD_PREPARE);
     }
 
-    private static boolean prepare(ServerLevel level, ActiveMission mission) {
+    private static boolean prepare(
+            ServerLevel level,
+            CampaignSavedData data,
+            ActiveMission mission) {
         if (!worldPreparationAllowed()) {
             LastTrain.LOGGER.warn(
                     "Fault injected: mission world preparation failed for {}",
@@ -211,7 +220,7 @@ public final class MissionWorldDirector {
                 case STATION_GATE -> prepareStationGate(level, mission);
                 case TRACK_CLEARANCE -> prepareTrackClearance(level, mission);
                 case SUPPLY_RECOVERY -> prepareSupplyRecovery(level, mission);
-                case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, mission);
+                case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, data, mission);
                 case RESCUE_SURVIVOR, SALVAGE_CAR -> true;
             };
         } catch (RuntimeException exception) {
@@ -375,8 +384,11 @@ public final class MissionWorldDirector {
         return true;
     }
 
-    private static boolean prepareZombieBlockade(ServerLevel level, ActiveMission mission) {
-        return reconcileZombieBlockade(level, mission);
+    private static boolean prepareZombieBlockade(
+            ServerLevel level,
+            CampaignSavedData data,
+            ActiveMission mission) {
+        return reconcileZombieBlockade(level, data, mission);
     }
 
     /**
@@ -502,16 +514,14 @@ public final class MissionWorldDirector {
                 && server.overworld().hasChunkAt(mission.site());
     }
 
-    private static boolean reconcileZombieBlockade(ServerLevel level, ActiveMission mission) {
+    private static boolean reconcileZombieBlockade(
+            ServerLevel level,
+            CampaignSavedData data,
+            ActiveMission mission) {
         String tag = missionEntityTag(mission);
-        List<Zombie> living = new ArrayList<>();
-        for (net.minecraft.world.entity.Entity entity : level.getAllEntities()) {
-            if (entity instanceof Zombie zombie
-                    && zombie.isAlive()
-                    && !zombie.isRemoved()
-                    && zombie.getTags().contains(tag)) {
-                living.add(zombie);
-            }
+        List<Zombie> living = findTaggedZombies(level, mission, tag);
+        if (living.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
+            recordEntityGuard(data, mission, "scan_budget");
         }
 
         ZombieBlockadePolicy.Reconciliation reconciliation =
@@ -519,8 +529,22 @@ public final class MissionWorldDirector {
                         mission.target(),
                         mission.progress(),
                         living.size());
+        if (reconciliation.hardCapApplied()) {
+            recordEntityGuard(data, mission, "hard_cap");
+        }
+        if (reconciliation.spawnBudgetApplied()) {
+            recordEntityGuard(data, mission, "spawn_budget");
+        }
+        Vec3 siteCenter = Vec3.atCenterOf(mission.site());
+        living.sort((left, right) -> ZombieBlockadePolicy.compareForEviction(
+                left.position().distanceToSqr(siteCenter),
+                left.tickCount,
+                left.getUUID(),
+                right.position().distanceToSqr(siteCenter),
+                right.tickCount,
+                right.getUUID()));
         for (int index = 0; index < reconciliation.toDiscard(); index++) {
-            living.get(living.size() - 1 - index).discard();
+            living.get(index).discard();
         }
 
         int retained = living.size() - reconciliation.toDiscard();
@@ -552,6 +576,37 @@ public final class MissionWorldDirector {
             }
         }
         return true;
+    }
+
+    private static List<Zombie> findTaggedZombies(
+            ServerLevel level,
+            ActiveMission mission,
+            String tag) {
+        List<Zombie> living = new ArrayList<>();
+        AABB bounds = AABB.ofSize(
+                Vec3.atCenterOf(mission.site()),
+                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D,
+                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D,
+                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D);
+        level.getEntities(
+                EntityTypeTest.forClass(Zombie.class),
+                bounds,
+                zombie -> zombie.isAlive()
+                        && !zombie.isRemoved()
+                        && zombie.getTags().contains(tag),
+                living,
+                ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+        return living;
+    }
+
+    private static void recordEntityGuard(
+            CampaignSavedData data,
+            ActiveMission mission,
+            String guard) {
+        data.recordIntegrityEvent(
+                CampaignIntegrityPolicy.Severity.WARNING,
+                CampaignIntegrityPolicy.Code.ENTITY_PERFORMANCE_GUARD,
+                guard + ":" + mission.id());
     }
 
     private static int observeRailRepair(ServerLevel level, ActiveMission mission) {
@@ -660,10 +715,10 @@ public final class MissionWorldDirector {
             }
             case ZOMBIE_BLOCKADE -> {
                 String tag = missionEntityTag(mission);
-                for (net.minecraft.world.entity.Entity entity : level.getAllEntities()) {
-                    if (entity instanceof Zombie zombie && zombie.getTags().contains(tag)) {
-                        zombie.discard();
-                    }
+                List<Zombie> living = findTaggedZombies(level, mission, tag);
+                living.forEach(Zombie::discard);
+                if (living.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
+                    return false;
                 }
             }
             case SUPPLY_RECOVERY -> {

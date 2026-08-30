@@ -47,13 +47,28 @@ public final class PlayerEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(player.getServer());
-        data.registerTeamMember(player.getUUID());
-        data.observeCaptainOnline(
-                isCaptainOnline(player.getServer(), data),
-                player.getServer().overworld().getGameTime());
-        issueStarterSupplies(player, data);
-        sendCampaignSummary(player, data);
-        enqueueReturn(player);
+        CampaignTickGuard.run(
+                data,
+                "player.login.team",
+                () -> data.registerTeamMember(player.getUUID()));
+        CampaignTickGuard.run(
+                data,
+                "player.login.captain",
+                () -> data.observeCaptainOnline(
+                        isCaptainOnline(player.getServer(), data),
+                        player.getServer().overworld().getGameTime()));
+        CampaignTickGuard.run(
+                data,
+                "player.login.supplies",
+                () -> issueStarterSupplies(player, data));
+        CampaignTickGuard.run(
+                data,
+                "player.login.summary",
+                () -> sendCampaignSummary(player, data));
+        CampaignTickGuard.run(
+                data,
+                "player.login.return_queue",
+                () -> enqueueReturn(player));
     }
 
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
@@ -61,19 +76,27 @@ public final class PlayerEvents {
             return;
         }
         CampaignSavedData data = CampaignSavedData.get(player.getServer());
-        sendCampaignSummary(player, data);
-        enqueueReturn(player);
+        CampaignTickGuard.run(
+                data,
+                "player.respawn.summary",
+                () -> sendCampaignSummary(player, data));
+        CampaignTickGuard.run(
+                data,
+                "player.respawn.return_queue",
+                () -> enqueueReturn(player));
     }
 
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             CampaignSavedData data = CampaignSavedData.get(player.getServer());
-            if (data.isCaptain(player.getUUID())) {
-                data.observeCaptainOnline(
-                        false,
-                        player.getServer().overworld().getGameTime());
-            }
-            removePending(player);
+            CampaignTickGuard.run(data, "player.logout", () -> {
+                if (data.isCaptain(player.getUUID())) {
+                    data.observeCaptainOnline(
+                            false,
+                            player.getServer().overworld().getGameTime());
+                }
+                removePending(player);
+            });
         }
     }
 
@@ -104,82 +127,106 @@ public final class PlayerEvents {
         Iterator<Map.Entry<UUID, PendingReturn>> iterator = pendingByPlayer.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<UUID, PendingReturn> entry = iterator.next();
-            ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
-            PendingReturn pending = entry.getValue();
-            int elapsed = Math.max(0, now - pending.queuedAtTick);
-            boolean online = player != null;
-            boolean spectator = online && player.isSpectator();
-            boolean trackingStarter = elapsed >= PlayerReturnPolicy.INITIAL_DELAY_TICKS
-                    && online
-                    && starterTrainId != null
-                    && SableTrainTracker.isTracking(player, starterTrainId);
-            boolean attemptDue = now >= pending.nextAttemptTick;
-
-            Optional<Vec3> gatheringPoint = Optional.empty();
-            if (online
-                    && !spectator
-                    && !trackingStarter
-                    && starterTrainId != null
-                    && elapsed >= PlayerReturnPolicy.INITIAL_DELAY_TICKS
-                    && elapsed < PlayerReturnPolicy.MAX_WAIT_TICKS
-                    && attemptDue) {
-                List<Vec3> gatheringPoints = SableTrainTracker.gatheringPoints(level, starterTrainId)
-                        .stream()
-                        .filter(point -> level.isInWorldBounds(BlockPos.containing(point)))
-                        .toList();
-                gatheringPoint = selectUnoccupiedGatheringPoint(player, gatheringPoints);
-            }
-
-            PlayerReturnPolicy.Decision decision = PlayerReturnPolicy.decide(
-                    elapsed,
-                    online,
-                    spectator,
-                    trackingStarter,
-                    gatheringPoint.isPresent(),
-                    attemptDue);
-            switch (decision) {
-                case WAIT -> {
-                }
-                case DISCARD, COMPLETE_IN_PLACE -> iterator.remove();
-                case TRY_TRAIN -> {
-                    Vec3 target = gatheringPoint.orElseThrow();
-                    // Synchronous chunk access and teleport both occur on the
-                    // logical server thread. Sable gets the following entity
-                    // tick to bind the player to the moving body.
-                    level.getChunkAt(BlockPos.containing(target));
-                    player.stopRiding();
-                    boolean teleported = player.teleportTo(
+            boolean remove = CampaignTickGuard.call(
+                    data,
+                    "player.return." + entry.getKey(),
+                    () -> processPendingReturn(
+                            server,
                             level,
-                            target.x,
-                            target.y,
-                            target.z,
-                            Set.of(),
-                            player.getYRot(),
-                            player.getXRot());
-                    pending.nextAttemptTick = now + PlayerReturnPolicy.RETRY_INTERVAL_TICKS;
-                    if (teleported) {
-                        player.setDeltaMovement(Vec3.ZERO);
-                        player.fallDistance = 0.0F;
-                        if (!pending.trainTeleportAnnounced) {
-                            player.sendSystemMessage(Component.translatable(
-                                    "message.lasttrain.returning_to_train"));
-                            pending.trainTeleportAnnounced = true;
-                        }
-                    }
-                }
-                case FALLBACK_TO_STATION -> {
-                    if (teleportToStarterStation(player, level, data)) {
-                        player.sendSystemMessage(Component.translatable(
-                                "message.lasttrain.returned_to_station"));
-                        iterator.remove();
-                    }
-                }
+                            data,
+                            now,
+                            starterTrainId,
+                            entry),
+                    false);
+            if (remove) {
+                iterator.remove();
             }
         }
 
         if (pendingByPlayer.isEmpty()) {
             PENDING_RETURNS.remove(server);
         }
+    }
+
+    private static boolean processPendingReturn(
+            MinecraftServer server,
+            ServerLevel level,
+            CampaignSavedData data,
+            int now,
+            UUID starterTrainId,
+            Map.Entry<UUID, PendingReturn> entry) {
+        ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+        PendingReturn pending = entry.getValue();
+        int elapsed = Math.max(0, now - pending.queuedAtTick);
+        boolean online = player != null;
+        boolean spectator = online && player.isSpectator();
+        boolean trackingStarter = elapsed >= PlayerReturnPolicy.INITIAL_DELAY_TICKS
+                && online
+                && starterTrainId != null
+                && SableTrainTracker.isTracking(player, starterTrainId);
+        boolean attemptDue = now >= pending.nextAttemptTick;
+
+        Optional<Vec3> gatheringPoint = Optional.empty();
+        if (online
+                && !spectator
+                && !trackingStarter
+                && starterTrainId != null
+                && elapsed >= PlayerReturnPolicy.INITIAL_DELAY_TICKS
+                && elapsed < PlayerReturnPolicy.MAX_WAIT_TICKS
+                && attemptDue) {
+            List<Vec3> gatheringPoints = SableTrainTracker.gatheringPoints(level, starterTrainId)
+                    .stream()
+                    .filter(point -> level.isInWorldBounds(BlockPos.containing(point)))
+                    .toList();
+            gatheringPoint = selectUnoccupiedGatheringPoint(player, gatheringPoints);
+        }
+
+        PlayerReturnPolicy.Decision decision = PlayerReturnPolicy.decide(
+                elapsed,
+                online,
+                spectator,
+                trackingStarter,
+                gatheringPoint.isPresent(),
+                attemptDue);
+        return switch (decision) {
+            case WAIT -> false;
+            case DISCARD, COMPLETE_IN_PLACE -> true;
+            case TRY_TRAIN -> {
+                Vec3 target = gatheringPoint.orElseThrow();
+                // Synchronous chunk access and teleport both occur on the
+                // logical server thread. Sable gets the following entity
+                // tick to bind the player to the moving body.
+                level.getChunkAt(BlockPos.containing(target));
+                player.stopRiding();
+                boolean teleported = player.teleportTo(
+                        level,
+                        target.x,
+                        target.y,
+                        target.z,
+                        Set.of(),
+                        player.getYRot(),
+                        player.getXRot());
+                pending.nextAttemptTick = now + PlayerReturnPolicy.RETRY_INTERVAL_TICKS;
+                if (teleported) {
+                    player.setDeltaMovement(Vec3.ZERO);
+                    player.fallDistance = 0.0F;
+                    if (!pending.trainTeleportAnnounced) {
+                        player.sendSystemMessage(Component.translatable(
+                                "message.lasttrain.returning_to_train"));
+                        pending.trainTeleportAnnounced = true;
+                    }
+                }
+                yield false;
+            }
+            case FALLBACK_TO_STATION -> {
+                boolean teleported = teleportToStarterStation(player, level, data);
+                if (teleported) {
+                    player.sendSystemMessage(Component.translatable(
+                            "message.lasttrain.returned_to_station"));
+                }
+                yield teleported;
+            }
+        };
     }
 
     public static void onServerStopping(ServerStoppingEvent event) {
