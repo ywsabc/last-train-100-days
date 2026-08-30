@@ -1,13 +1,13 @@
 name = "TongDa Railway"
-filename = "tongdarailway-1.1.3+mc21.1.jar"
+filename = "tongdarailway-1.1.5+mc21.1.jar"
 side = "both"
 
 [download]
 hash-format = "sha1"
-hash = "67499bdcafd5b708888788737fab52c5d49512da"
+hash = "ed203b1560bf28d43b374f254184bf428ef7e5ad"
 mode = "metadata:curseforge"
 
 [update]
 [update.curseforge]
-file-id = 8071627
+file-id = 8704182
 project-id = 1381363
