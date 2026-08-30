@@ -1,6 +1,6 @@
 # 兼容性基线
 
-状态日期：2026-08-01（含模组事实核查，见 MOD_VERIFICATION.md）。
+状态日期：2026-08-30（模组已升级：TongDa 1.1.5 / Sable 2.0.5 / Create Aeronautics 1.3.2，专服冒烟通过）。
 
 ## 目标平台
 
@@ -13,9 +13,9 @@
 | 汽鸣铁道 | Create: Steam 'n' Rails 1.21.1 NeoForge 移植版
   （[Porters-of-Railways](https://github.com/Porters-of-Railways/Railway-1.21.1)，
   官方跳过 1.21.1，当前为非官方移植版，LGPL），版本随 Create 锁定 |
-| 线路生成 | TongDa Railway 1.1.3 |
-| 物理引擎 | Sable 2.0.3，最终版本随最终载具实现锁定 |
-| 物理列车 | Create Simurail `e68481d` Alpha |
+| 线路生成 | TongDa Railway 1.1.5 |
+| 物理引擎 | Sable 2.0.5（Sable Companion 1.6.0 随 bundled 内置） |
+| 物理列车 | Create Aeronautics 1.3.2（bundled，含 Simurail 物理内核） |
 | 枪械 | 非官方 TaCZ 1.1.8 hotfix r5 |
 
 1.20.1 Forge 的通达铁路移植版不属于目标平台，不与 1.21.1 物理列车方案混用。
