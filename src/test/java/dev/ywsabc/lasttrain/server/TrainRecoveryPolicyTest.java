@@ -205,6 +205,29 @@ class TrainRecoveryPolicyTest {
     }
 
     @Test
+    void extremeRecoveryValuesClampWithoutIntegerWraparound() {
+        TrainRecoveryPolicy.RescueCosts maximum = TrainRecoveryPolicy.applyCosts(
+                Integer.MAX_VALUE,
+                Integer.MAX_VALUE);
+        assertEquals(PursuitPolicy.MAX_ATTENTION, maximum.attention());
+        assertEquals(100, maximum.threat());
+
+        TrainRecoveryPolicy.RescueCosts minimum = TrainRecoveryPolicy.applyCosts(
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE);
+        assertEquals(0, minimum.attention());
+        assertEquals(0, minimum.threat());
+        assertEquals(
+                TrainRecoveryPolicy.RESCUE_COUNT_LIMIT,
+                TrainRecoveryPolicy.incrementRescueCount(Integer.MAX_VALUE));
+        assertEquals(0, TrainRecoveryPolicy.incrementRescueCount(Integer.MIN_VALUE));
+        assertFalse(TrainRecoveryPolicy.canRescue(
+                1,
+                Integer.MAX_VALUE,
+                Integer.MIN_VALUE));
+    }
+
+    @Test
     void movementAndDangerDistanceThresholds() {
         assertFalse(TrainRecoveryPolicy.isMoving(0.0D));
         assertFalse(TrainRecoveryPolicy.isMoving(TrainRecoveryPolicy.MOVEMENT_EPSILON_SQUARED));

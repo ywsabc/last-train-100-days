@@ -1,6 +1,7 @@
 package dev.ywsabc.lasttrain.mission;
 
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
+import dev.ywsabc.lasttrain.server.CampaignTickGuard;
 import dev.ywsabc.lasttrain.text.TranslationKeys;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -58,6 +59,9 @@ public final class MissionEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        if (!CampaignTickGuard.allowsWorldWrite(data, "mission.event.entity_join")) {
+            return;
+        }
         ActiveMission mission = data.activeMission();
         if (event.getEntity() instanceof ItemEntity droppedItem
                 && level == level.getServer().overworld()
@@ -188,6 +192,9 @@ public final class MissionEvents {
         }
 
         CampaignSavedData data = CampaignSavedData.get(level.getServer());
+        if (!CampaignTickGuard.allowsWorldWrite(data, "mission.event.salvage_repair")) {
+            return;
+        }
         for (ActiveMission mission : data.optionalMissions()) {
             if (mission.type() != MissionType.SALVAGE_CAR
                     || mission.stage() != MissionStage.ACTIVE

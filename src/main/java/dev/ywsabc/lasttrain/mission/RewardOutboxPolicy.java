@@ -8,33 +8,28 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Durable reward outbox policy for mission completion rewards.
+ * 任务完成奖励的持久 outbox 策略。
  *
- * <p>The operation marker stored on the same block entity as the reward
- * items is the authority over the world mutation. The saved-data receipt is
- * the durable intent/acknowledgement side of the outbox. Reconciliation uses
- * both stores:</p>
+ * <p>奖励箱 block entity 上的 operation marker 与存档中的已完成 operation
+ * 集合，是两份互相独立的世界写入证明。收据负责持久化投递意图与确认状态；任一
+ * 完成证明命中即可阻止重发：</p>
  * <ul>
- * <li>marker present + PENDING receipt → {@link GrantDecision#CLAIM_ONLY};</li>
- * <li>marker absent (PENDING or CLAIMED) →
+ * <li>完成证明存在 + PENDING 收据 → {@link GrantDecision#CLAIM_ONLY}；</li>
+ * <li>完成证明缺失（PENDING 或 CLAIMED）→
  * {@link GrantDecision#GRANT_AND_CLAIM};</li>
- * <li>marker present + CLAIMED receipt → {@link GrantDecision#NO_OP}.</li>
+ * <li>完成证明存在 + CLAIMED 收据 → {@link GrantDecision#NO_OP}。</li>
  * </ul>
- * A successful dispatch writes the whole payload and marker to one block
- * entity before flipping the receipt to CLAIMED. If either storage is ahead
- * after a crash, the next scan therefore closes the gap without duplicating
- * or losing the payload.
+ * 成功投递会先把完整 payload 与 marker 写入同一个 block entity，再把收据改为
+ * CLAIMED 并写入存档侧完成证明。崩溃导致任一存储领先时，下一轮扫描都只会补齐
+ * 另一侧，不会重复或丢失奖励。
  *
- * <p>Each grant attempt is atomic per receipt: the exact payload either lands
- * in full or is deferred in full, so a failed attempt can never leave a
- * partial reward behind. Existing matching crate contents alone never count
- * as proof of delivery; only the stable operation marker does. Receipts are
- * independent and every operation id can mutate the crate at most once.</p>
+ * <p>每次投递以单张收据为原子边界：payload 要么完整落箱，要么完整延后，失败
+ * 不会留下部分奖励。箱内恰好存在同类物品不算投递证明，只有稳定 marker 或存档
+ * 完成集合才算；每个 operationId 最多改变一次奖励箱。</p>
  *
- * <p>Receipts and crate markers are capped at
- * {@link #MAX_RECEIPTS} / {@link #MAX_MARKERS}; eviction only ever drops
- * CLAIMED history first, and a crate marker eviction always pairs with its
- * CLAIMED receipt so neither side can outlive the other.</p>
+ * <p>收据和 marker 分别受 {@link #MAX_RECEIPTS} / {@link #MAX_MARKERS} 限制；
+ * 淘汰只优先删除 CLAIMED 历史，marker 淘汰时会同步删除对应 CLAIMED 收据及存档
+ * 完成证明，避免三份状态失配。</p>
  *
  * <p>Payloads are registry-free {@link RewardItem} entries so the policy stays
  * unit-testable without a running game. The world adapter materializes them

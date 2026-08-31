@@ -182,6 +182,47 @@ class RewardOutboxPolicyTest {
     }
 
     @Test
+    void savedCompletionSuppressesReplayAfterCrateMarkerIsLost() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        CampaignSavedData data = completedReceiptData(missionId);
+        FakeCrate replacement = new FakeCrate();
+
+        boolean operationApplied = data.hasCompletedRewardOperation(operationId)
+                || replacement.operationIds().contains(operationId);
+        GrantDecision decision = RewardOutboxPolicy.reconcile(
+                ReceiptState.CLAIMED,
+                operationApplied);
+
+        assertEquals(GrantDecision.NO_OP, decision);
+        replacement.resetAccessCalls();
+        assertFalse(RewardOutboxPolicy.settle(
+                decision,
+                replacement,
+                operationId,
+                RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId)));
+        assertEquals(0, replacement.accessCalls);
+        assertTrue(replacement.contents().isEmpty());
+    }
+
+    @Test
+    void savedCompletionAndCrateMarkerTogetherRemainIdempotent() {
+        UUID missionId = UUID.randomUUID();
+        String operationId = RewardOutboxPolicy.operationId(missionId);
+        CampaignSavedData data = completedReceiptData(missionId);
+        FakeCrate crate = new FakeCrate();
+        crate.addOperationMarker(operationId);
+
+        boolean operationApplied = data.hasCompletedRewardOperation(operationId)
+                || crate.operationIds().contains(operationId);
+        assertEquals(
+                GrantDecision.NO_OP,
+                RewardOutboxPolicy.reconcile(ReceiptState.CLAIMED, operationApplied));
+        assertEquals(0, crate.addAllCalls);
+        assertEquals(List.of(operationId), crate.operationIds());
+    }
+
+    @Test
     void payloadsRespectTheSanityWindowAndNeverPackIllegalStacks() {
         UUID missionId = UUID.randomUUID();
         List<RewardItem> rescue = RewardOutboxPolicy.payload(MissionType.RESCUE_SURVIVOR, missionId);
@@ -522,6 +563,21 @@ class RewardOutboxPolicyTest {
         receipts.add(receiptTag(claimedFirst, "CLAIMED"));
         receipts.add(receiptTag(claimedSecond, "CLAIMED"));
         tag.put("reward_receipts", receipts);
+        return CampaignSavedData.load(tag, null);
+    }
+
+    private static CampaignSavedData completedReceiptData(UUID missionId) {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("schema_version", CampaignSavedData.CURRENT_SCHEMA);
+        tag.putString("campaign_id", UUID.randomUUID().toString());
+        tag.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        receipts.add(receiptTag(missionId, "CLAIMED"));
+        tag.put("reward_receipts", receipts);
+        ListTag operations = new ListTag();
+        operations.add(net.minecraft.nbt.StringTag.valueOf(
+                RewardOutboxPolicy.operationId(missionId)));
+        tag.put("completed_reward_operations", operations);
         return CampaignSavedData.load(tag, null);
     }
 

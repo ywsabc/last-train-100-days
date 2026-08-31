@@ -85,16 +85,22 @@ public final class TrainRecoveryPolicy {
         if (lastRescueDay <= 0) {
             return true;
         }
-        return currentDay - lastRescueDay >= RESCUE_COOLDOWN_DAYS;
+        return (long) currentDay - lastRescueDay >= RESCUE_COOLDOWN_DAYS;
     }
 
     public static RescueCosts applyCosts(int attention, int threat) {
         return new RescueCosts(
-                Math.clamp(
-                        attention + RESCUE_ATTENTION_COST,
-                        0,
-                        PursuitPolicy.MAX_ATTENTION),
-                Math.clamp(threat + RESCUE_THREAT_COST, 0, 100));
+                clampAdd(attention, RESCUE_ATTENTION_COST, PursuitPolicy.MAX_ATTENTION),
+                clampAdd(threat, RESCUE_THREAT_COST, 100));
+    }
+
+    /** 极端旧档值也先扩为 long 再限幅，避免自增回绕成负数。 */
+    public static int incrementRescueCount(int rescueCount) {
+        return clampAdd(rescueCount, 1, RESCUE_COUNT_LIMIT);
+    }
+
+    private static int clampAdd(int value, int increment, int maximum) {
+        return (int) Math.clamp((long) value + increment, 0L, maximum);
     }
 
     /** A squared per-tick displacement at or below the epsilon counts as parked. */

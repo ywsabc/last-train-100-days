@@ -57,7 +57,7 @@ public final class PlayerEvents {
                 () -> data.observeCaptainOnline(
                         isCaptainOnline(player.getServer(), data),
                         player.getServer().overworld().getGameTime()));
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "player.login.supplies",
                 () -> issueStarterSupplies(player, data));
@@ -127,7 +127,7 @@ public final class PlayerEvents {
         Iterator<Map.Entry<UUID, PendingReturn>> iterator = pendingByPlayer.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<UUID, PendingReturn> entry = iterator.next();
-            boolean remove = CampaignTickGuard.call(
+            boolean remove = CampaignTickGuard.callWorldWrite(
                     data,
                     "player.return." + entry.getKey(),
                     () -> processPendingReturn(

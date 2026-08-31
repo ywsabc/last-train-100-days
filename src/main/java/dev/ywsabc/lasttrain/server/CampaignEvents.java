@@ -29,8 +29,14 @@ public final class CampaignEvents {
         MinecraftServer server = event.getServer();
         CampaignSavedData data = CampaignSavedData.get(server);
         data.initialize(server.overworld().getSeed());
-        WorldBootstrap.ensureStarterStation(server.overworld(), data);
-        SimurailTrainBootstrap.ensureLayout(server.overworld(), data);
+        CampaignTickGuard.runWorldWrite(
+                data,
+                "campaign.world_bootstrap",
+                () -> WorldBootstrap.ensureStarterStation(server.overworld(), data));
+        CampaignTickGuard.runWorldWrite(
+                data,
+                "campaign.simurail_layout",
+                () -> SimurailTrainBootstrap.ensureLayout(server.overworld(), data));
         IntegrationBridge.syncCampaignNumbers(server, data);
         LastTrain.LOGGER.info(
                 "Loaded campaign {} (status={}, day={}, route={})",
@@ -53,7 +59,7 @@ public final class CampaignEvents {
     public static void onServerTick(ServerTickEvent.Post event) {
         MinecraftServer server = event.getServer();
         CampaignSavedData data = CampaignSavedData.get(server);
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "campaign.simurail",
                 () -> SimurailTrainBootstrap.tick(
@@ -86,11 +92,11 @@ public final class CampaignEvents {
         // 路线落块、任务实体、奖励箱与清理队列都属于世界副作用；无人在线时
         // 整体暂停，避免专服空转期间悄悄改变现场。载具恢复探测仍在上方执行，
         // 以便依赖丢失能及时进入 SAFE_MODE。
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "campaign.route_director",
                 () -> RouteDirector.tick(server, data, server.getTickCount()));
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "campaign.mission_director",
                 () -> MissionWorldDirector.tick(server, data, server.getTickCount()));

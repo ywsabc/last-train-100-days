@@ -3,8 +3,6 @@ package dev.ywsabc.lasttrain.mission;
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.campaign.CampaignIntegrityPolicy;
 import dev.ywsabc.lasttrain.campaign.CampaignSavedData;
-import dev.ywsabc.lasttrain.campaign.CampaignStatus;
-import dev.ywsabc.lasttrain.campaign.SafeModeReason;
 import dev.ywsabc.lasttrain.route.RouteDirector;
 import dev.ywsabc.lasttrain.route.RouteGeometry;
 import dev.ywsabc.lasttrain.server.CampaignTickGuard;
@@ -72,16 +70,16 @@ public final class OptionalMissionDirector {
                     Component.translatable("message.lasttrain.optional_timed_out", timedOut),
                     false);
         }
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "mission.reward_outbox",
                 () -> dispatchPendingRewards(server.overworld(), data));
-        CampaignTickGuard.run(
+        CampaignTickGuard.runWorldWrite(
                 data,
                 "mission.optional_cleanup",
                 () -> processPendingCleanups(server.overworld(), data));
         for (ActiveMission mission : data.optionalMissions()) {
-            CampaignTickGuard.run(
+            CampaignTickGuard.runWorldWrite(
                     data,
                     "mission.optional." + mission.id(),
                     () -> tickMission(server, data, mission));
@@ -390,34 +388,35 @@ public final class OptionalMissionDirector {
     // ------------------------------------------------------------------
 
     private static void dispatchPendingRewards(ServerLevel level, CampaignSavedData data) {
-        if (data.status() == CampaignStatus.SAFE_MODE) {
-            // An outbox-overflow reason can only heal by draining its pending
-            // receipts. Every other SAFE_MODE owner still pauses world writes.
-            if (!data.safeModeReasons().equals(Set.of(SafeModeReason.REWARD_OUTBOX_OVERFLOW))) {
-                return;
-            }
-        }
         BlockPos cratePos = rewardCratePos(data);
         boolean chunkLoaded = level.hasChunkAt(cratePos);
         for (CampaignSavedData.RewardReceipt receipt : data.rewardReceipts()) {
             String operationId = RewardOutboxPolicy.operationId(receipt.missionId());
-            if (!chunkLoaded) {
-                continue;
+            boolean savedOperationApplied = data.hasCompletedRewardOperation(operationId);
+            ChestCrateAccess crate = null;
+            boolean operationApplied = savedOperationApplied;
+            if (!operationApplied) {
+                if (!chunkLoaded) {
+                    continue;
+                }
+                ChestBlockEntity chest = ensureRewardCrate(level, cratePos);
+                if (chest == null) {
+                    continue;
+                }
+                crate = new ChestCrateAccess(chest);
+                operationApplied = crate.operationIds().contains(operationId);
             }
-            ChestBlockEntity chest = ensureRewardCrate(level, cratePos);
-            if (chest == null) {
-                continue;
-            }
-            ChestCrateAccess crate = new ChestCrateAccess(chest);
-            boolean operationApplied = crate.operationIds().contains(operationId);
             RewardOutboxPolicy.GrantDecision decision = RewardOutboxPolicy.reconcile(
                     receipt.state(), operationApplied);
-            if (RewardOutboxPolicy.settle(
+            boolean shouldAcknowledge = RewardOutboxPolicy.settle(
                             decision,
                             crate,
                             operationId,
                             RewardOutboxPolicy.payload(receipt.type(), receipt.missionId()))
-                    && data.markRewardClaimed(receipt.missionId())) {
+                    // 旧存档的 CLAIMED 收据可能尚无存档侧证明；箱体 marker
+                    // 命中时补齐第二份证明，不触碰箱内物品。
+                    || (operationApplied && !savedOperationApplied);
+            if (shouldAcknowledge && data.markRewardClaimed(receipt.missionId())) {
                 if (decision == RewardOutboxPolicy.GrantDecision.GRANT_AND_CLAIM) {
                     broadcastRewardDelivered(level);
                 }
@@ -475,11 +474,9 @@ public final class OptionalMissionDirector {
     }
 
     /**
-     * Caps the crate marker set at {@link RewardOutboxPolicy#MAX_MARKERS}.
-     * Markers backed by PENDING receipts are never evicted; among the rest
-     * the oldest marker goes first and its CLAIMED receipt is dropped
-     * together with it — evicting only one side would let the surviving
-     * CLAIMED receipt re-open the grant loop on the next dispatch round.
+     * 将奖励箱 marker 限制在 {@link RewardOutboxPolicy#MAX_MARKERS} 内。PENDING
+     * 收据对应的 marker 永不淘汰；其余按最旧优先，并同步删除 CLAIMED 收据及存档
+     * 完成证明，使三份状态保持有界且一致。
      */
     static void capCrateMarkers(RewardOutboxPolicy.CrateAccess crate, CampaignSavedData data) {
         Set<String> pendingMarkers = new HashSet<>();
@@ -745,9 +742,9 @@ public final class OptionalMissionDirector {
                 List<Villager> survivors = findSurvivors(
                         level,
                         tag,
-                        ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+                        ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK);
                 survivors.forEach(Villager::discard);
-                if (survivors.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
+                if (survivors.size() >= ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK) {
                     return false;
                 }
             }
