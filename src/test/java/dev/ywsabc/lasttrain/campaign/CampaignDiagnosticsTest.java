@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ywsabc.lasttrain.mission.MissionEntityContainer;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ class CampaignDiagnosticsTest {
         CampaignSavedData data = new CampaignSavedData();
         assertTrue(data.start(UUID.fromString("00000000-0000-0000-0000-000000000061")));
         assertTrue(data.createMission(MissionType.RAIL_BREAK));
+        assertTrue(data.registerMissionEntity(data.activeMission().id(), UUID.randomUUID()));
 
         CampaignDiagnostics snapshot = CampaignDiagnostics.snapshot(data, 4);
         CampaignDiagnostics.MissionView mission = snapshot.activeMission().orElseThrow();
@@ -27,6 +29,10 @@ class CampaignDiagnosticsTest {
         assertEquals(MissionType.RAIL_BREAK, mission.type());
         assertEquals(data.activeMission().id(), mission.id());
         assertEquals(0, snapshot.pendingRewards());
+        assertEquals(1, snapshot.missionEntities());
+        assertEquals(
+                MissionEntityContainer.MAX_REGISTERED_ENTITIES,
+                snapshot.missionEntityCapacity());
         assertFalse(snapshot.proposalPending());
 
         // 后续可变存档变化不会回写到已经采样的详细视图。

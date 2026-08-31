@@ -66,6 +66,22 @@ class ActiveMissionTest {
     }
 
     @Test
+    void entityUuidIndexAndInitializationMarkerSurviveMissionSnapshotReload() {
+        ActiveMission mission = ActiveMission.create(
+                MissionType.RESCUE_SURVIVOR,
+                8,
+                3);
+        UUID survivorId = UUID.randomUUID();
+        assertTrue(mission.registerEntity(survivorId));
+        assertTrue(mission.markEntityIndexInitialized());
+
+        ActiveMission loaded = ActiveMission.load(mission.save(null), null);
+
+        assertEquals(java.util.Set.of(survivorId), loaded.entityIds());
+        assertTrue(loaded.entityIndexInitialized());
+    }
+
+    @Test
     void malformedPersistedBoundsAreNormalizedWithoutKeepingAPhantomPreparedSite() {
         CompoundTag tag = new CompoundTag();
         tag.putString("id", UUID.randomUUID().toString());

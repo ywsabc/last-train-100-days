@@ -41,6 +41,7 @@ public final class LastTrain {
                 LivingDeathEvent.class,
                 MissionEvents::onLivingDeath);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onEntityJoin);
+        NeoForge.EVENT_BUS.addListener(MissionEvents::onEntityLeave);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onBlockBreak);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onExplosionDetonate);
         NeoForge.EVENT_BUS.addListener(MissionEvents::onPistonPre);

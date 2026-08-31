@@ -21,8 +21,9 @@ public final class FinalePolicy {
      * cursor and pending segment plans); saves without the key keep the
      * historical route rules version 1 until an explicit migration. Schema 11
      * 增加单调感染阶段/计时；旧存档固定从阶段 0 开始，不从已封顶的 day 反算。
+     * Schema 12 为活动任务与延期清理快照增加任务实体 UUID 索引。
      */
-    public static final int CURRENT_SCHEMA = 11;
+    public static final int CURRENT_SCHEMA = 12;
     public static final int FINAL_DAY = 100;
     public static final int FINALE_HUB_START_DAY = 90;
     public static final int FINALE_HUB_WINDOW_SEGMENTS = 8;

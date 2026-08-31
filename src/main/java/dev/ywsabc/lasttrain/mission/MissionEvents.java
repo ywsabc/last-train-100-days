@@ -13,6 +13,7 @@ import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonStructureResolver;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
@@ -25,16 +26,18 @@ public final class MissionEvents {
     }
 
     public static void onLivingDeath(LivingDeathEvent event) {
-        if (!(event.getEntity() instanceof Zombie zombie)
-                || !(zombie.level() instanceof ServerLevel level)
-                || !(event.getSource().getEntity() instanceof ServerPlayer)) {
+        if (!(event.getEntity().level() instanceof ServerLevel level)) {
             return;
         }
 
         MinecraftServer server = level.getServer();
         CampaignSavedData data = CampaignSavedData.get(server);
         ActiveMission mission = data.activeMission();
-        if (mission == null
+        // 无论死因是什么都先释放 UUID 占用；只有玩家击杀路障僵尸才推进任务。
+        data.unregisterMissionEntity(event.getEntity().getUUID());
+        if (!(event.getEntity() instanceof Zombie zombie)
+                || !(event.getSource().getEntity() instanceof ServerPlayer)
+                || mission == null
                 || mission.type() != MissionType.ZOMBIE_BLOCKADE
                 || mission.stage() != MissionStage.ACTIVE
                 || !zombie.getTags().contains(MissionWorldDirector.missionEntityTag(mission))) {
@@ -73,12 +76,18 @@ public final class MissionEvents {
         }
 
         if (event.getEntity() instanceof Zombie zombie) {
-            String activeTag = null;
             if (mission != null && mission.type() == MissionType.ZOMBIE_BLOCKADE) {
-                activeTag = MissionWorldDirector.missionEntityTag(mission);
+                String activeTag = MissionWorldDirector.missionEntityTag(mission);
+                if (zombie.getTags().contains(activeTag)) {
+                    if (!data.registerMissionEntity(mission.id(), zombie.getUUID())) {
+                        zombie.discard();
+                    }
+                    return;
+                }
             }
             for (String tag : zombie.getTags()) {
-                if (MissionWorldDirector.isMissionEntityTag(tag) && !tag.equals(activeTag)) {
+                if (MissionWorldDirector.isMissionEntityTag(tag)) {
+                    data.unregisterMissionEntity(zombie.getUUID());
                     zombie.discard();
                     return;
                 }
@@ -88,24 +97,48 @@ public final class MissionEvents {
 
         if (event.getEntity() instanceof Villager survivor) {
             for (String tag : survivor.getTags()) {
-                if (MissionWorldDirector.isSurvivorEntityTag(tag)
-                        && !belongsToActiveRescueMission(data, tag)) {
-                    survivor.discard();
-                    return;
+                if (!MissionWorldDirector.isSurvivorEntityTag(tag)) {
+                    continue;
                 }
+                ActiveMission rescue = activeRescueMission(data, tag);
+                if (rescue != null) {
+                    if (!data.registerMissionEntity(rescue.id(), survivor.getUUID())) {
+                        survivor.discard();
+                    }
+                } else {
+                    data.unregisterMissionEntity(survivor.getUUID());
+                    survivor.discard();
+                }
+                return;
             }
         }
     }
 
-    private static boolean belongsToActiveRescueMission(CampaignSavedData data, String survivorTag) {
+    /**
+     * 捕获非死亡的真正销毁路径（命令 discard、其他模组回收等）。区块卸载与换维度
+     * 不移除 UUID，因为这些实体仍然存在并必须继续占用全局硬上限。
+     */
+    public static void onEntityLeave(EntityLeaveLevelEvent event) {
+        if (!(event.getLevel() instanceof ServerLevel level)
+                || event.getEntity().getRemovalReason() == null
+                || !event.getEntity().getRemovalReason().shouldDestroy()) {
+            return;
+        }
+        CampaignSavedData.get(level.getServer())
+                .unregisterMissionEntity(event.getEntity().getUUID());
+    }
+
+    private static ActiveMission activeRescueMission(
+            CampaignSavedData data,
+            String survivorTag) {
         for (ActiveMission mission : data.optionalMissions()) {
             if (mission.type() == MissionType.RESCUE_SURVIVOR
                     && mission.stage() == MissionStage.ACTIVE
                     && MissionWorldDirector.survivorEntityTag(mission).equals(survivorTag)) {
-                return true;
+                return mission;
             }
         }
-        return false;
+        return null;
     }
 
     public static void onBlockBreak(BlockEvent.BreakEvent event) {
