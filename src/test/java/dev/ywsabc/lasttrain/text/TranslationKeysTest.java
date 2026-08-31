@@ -12,6 +12,7 @@ import dev.ywsabc.lasttrain.mission.MissionBriefing;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
+import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import org.junit.jupiter.api.Test;
 
 class TranslationKeysTest {
@@ -48,6 +49,9 @@ class TranslationKeysTest {
                 "integrity.lasttrain.non_contiguous_route_plan",
                 TranslationKeys.integrity(
                         CampaignIntegrityPolicy.Code.NON_CONTIGUOUS_ROUTE_PLAN));
+        assertEquals(
+                "recovery.lasttrain.phase.verifying",
+                TranslationKeys.rescuePhase(TrainRecoveryPolicy.RescuePhase.VERIFYING));
     }
 
     @Test
@@ -55,5 +59,6 @@ class TranslationKeysTest {
         assertThrows(NullPointerException.class, () -> TranslationKeys.campaignStatus(null));
         assertThrows(NullPointerException.class, () -> TranslationKeys.mission(null));
         assertThrows(NullPointerException.class, () -> TranslationKeys.missionStage(null));
+        assertThrows(NullPointerException.class, () -> TranslationKeys.rescuePhase(null));
     }
 }

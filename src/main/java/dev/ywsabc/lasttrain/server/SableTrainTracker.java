@@ -38,6 +38,12 @@ public final class SableTrainTracker {
             "dev.ryanhcode.sable.api.sublevel.ticket.SubLevelLoadingTicketType";
     private static final String HOLDING_SUBLEVEL_CLASS =
             "dev.ryanhcode.sable.sublevel.storage.HoldingSubLevel";
+    private static final String PHYSICS_PIPELINE_BODY_CLASS =
+            "dev.ryanhcode.sable.api.physics.PhysicsPipelineBody";
+    private static final String VECTOR3DC_CLASS = "org.joml.Vector3dc";
+    private static final String VECTOR3D_CLASS = "org.joml.Vector3d";
+    private static final String QUATERNIONDC_CLASS = "org.joml.Quaterniondc";
+    private static final String QUATERNIOND_CLASS = "org.joml.Quaterniond";
     private static final String UNIT_CLASS = "net.minecraft.util.Unit";
     private static final String STARTER_TAG = "lasttrain_starter_train";
     private static final String CAMPAIGN_TAG = "lasttrain_campaign_id";
@@ -77,6 +83,79 @@ public final class SableTrainTracker {
     /** Resolves the first currently intact gathering-deck slot. */
     public static Optional<Vec3> gatheringPoint(ServerLevel level, UUID sublevelId) {
         return gatheringPoints(level, sublevelId).stream().findFirst();
+    }
+
+    /**
+     * 读取用于物理救援验证的原始集合点。这里不要求甲板仍为安全出生面，
+     * 因为受损甲板也必须允许车体先回正；玩家传送仍走严格的 gatheringPoints。
+     */
+    public static Optional<Vec3> recoveryReferencePoint(ServerLevel level, UUID sublevelId) {
+        if (sublevelId == null) {
+            return Optional.empty();
+        }
+        try {
+            Object subLevel = activeSubLevel(level, sublevelId);
+            if (subLevel == null) {
+                return Optional.empty();
+            }
+            Optional<Vec3> plotPoint = taggedGatheringPoint(subLevel);
+            return plotPoint.flatMap(point -> transformPosition(subLevel, point, false));
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
+            logFailure("resolve the train recovery reference point", exception);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 通过 Sable 2.0.5 的物理管线把车体回正为单位旋转，并清空线速度、角速度
+     * 与旧包围盒插值。返回 APPLIED 只表示后端已接受，调用方下一 tick 仍需复核。
+     */
+    public static TrainRepositionResult repositionOnRoute(
+            ServerLevel level,
+            UUID sublevelId,
+            Vec3 targetGatheringPoint) {
+        if (sublevelId == null || targetGatheringPoint == null || !finite(targetGatheringPoint)) {
+            return TrainRepositionResult.BACKEND_FAILURE;
+        }
+        try {
+            ensureForceLoaded(level, sublevelId);
+            Object subLevel = activeSubLevel(level, sublevelId);
+            if (subLevel == null) {
+                return TrainRepositionResult.RETRY;
+            }
+            Optional<Vec3> plotGatheringPoint = taggedGatheringPoint(subLevel);
+            if (plotGatheringPoint.isEmpty()) {
+                return TrainRepositionResult.BACKEND_FAILURE;
+            }
+            Vec3 posePosition = TrainRecoveryPolicy.recoveryPosePosition(
+                    plotGatheringPoint.orElseThrow(),
+                    targetGatheringPoint);
+
+            Object container = container(level);
+            Object physicsSystem = container.getClass().getMethod("physicsSystem").invoke(container);
+            Object pipeline = physicsSystem.getClass().getMethod("getPipeline").invoke(physicsSystem);
+            Class<?> bodyType = Class.forName(PHYSICS_PIPELINE_BODY_CLASS);
+            Class<?> vectorType = Class.forName(VECTOR3DC_CLASS);
+            Class<?> quaternionType = Class.forName(QUATERNIONDC_CLASS);
+            Object position = Class.forName(VECTOR3D_CLASS)
+                    .getConstructor(double.class, double.class, double.class)
+                    .newInstance(posePosition.x, posePosition.y, posePosition.z);
+            Object identity = Class.forName(QUATERNIOND_CLASS).getConstructor().newInstance();
+
+            pipeline.getClass()
+                    .getMethod("teleport", bodyType, vectorType, quaternionType)
+                    .invoke(pipeline, subLevel, position, identity);
+            pipeline.getClass()
+                    .getMethod("resetVelocity", bodyType)
+                    .invoke(pipeline, subLevel);
+            subLevel.getClass().getMethod("updateLastPose").invoke(subLevel);
+            subLevel.getClass().getMethod("updateBoundingBox").invoke(subLevel);
+            subLevel.getClass().getMethod("forceUpdateGlobalBounds").invoke(subLevel);
+            return TrainRepositionResult.APPLIED;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
+            logFailure("reposition the starter train on the verified route", exception);
+            return TrainRepositionResult.BACKEND_FAILURE;
+        }
     }
 
     /**
@@ -371,6 +450,22 @@ public final class SableTrainTracker {
         return rawTag instanceof CompoundTag tag ? tag : null;
     }
 
+    private static Optional<Vec3> taggedGatheringPoint(Object subLevel)
+            throws ReflectiveOperationException {
+        CompoundTag tag = userData(subLevel);
+        if (tag == null
+                || !tag.contains(GATHER_X_TAG)
+                || !tag.contains(GATHER_Y_TAG)
+                || !tag.contains(GATHER_Z_TAG)) {
+            return Optional.empty();
+        }
+        Vec3 result = new Vec3(
+                tag.getDouble(GATHER_X_TAG),
+                tag.getDouble(GATHER_Y_TAG),
+                tag.getDouble(GATHER_Z_TAG));
+        return finite(result) ? Optional.of(result) : Optional.empty();
+    }
+
     static Optional<Vec3> transformPosition(
             Object subLevel,
             Vec3 position,
@@ -466,5 +561,11 @@ public final class SableTrainTracker {
         if (LOGGED_FAILURES.add(key)) {
             LastTrain.LOGGER.warn(message, argument);
         }
+    }
+
+    public enum TrainRepositionResult {
+        APPLIED,
+        RETRY,
+        BACKEND_FAILURE
     }
 }

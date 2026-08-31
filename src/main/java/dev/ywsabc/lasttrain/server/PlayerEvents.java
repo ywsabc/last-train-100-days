@@ -59,6 +59,10 @@ public final class PlayerEvents {
                         player.getServer().overworld().getGameTime()));
         CampaignTickGuard.run(
                 data,
+                "player.login.tutorial",
+                () -> sendFirstJoinTutorial(player, data));
+        CampaignTickGuard.run(
+                data,
                 "player.login.supplies",
                 () -> issueStarterSupplies(player, data));
         CampaignTickGuard.run(
@@ -219,12 +223,16 @@ public final class PlayerEvents {
                 yield false;
             }
             case FALLBACK_TO_STATION -> {
-                boolean teleported = teleportToStarterStation(player, level, data);
-                if (teleported) {
+                PlayerReturnPolicy.RallyTarget target = teleportToRallyStation(player, level, data);
+                if (target == PlayerReturnPolicy.RallyTarget.ACTIVATED_STATION) {
                     player.sendSystemMessage(Component.translatable(
-                            "message.lasttrain.returned_to_station"));
+                            "message.lasttrain.returned_to_activated_station",
+                            data.activatedStationSegment()));
+                } else if (target == PlayerReturnPolicy.RallyTarget.STARTER_STATION) {
+                    player.sendSystemMessage(Component.translatable(
+                            "message.lasttrain.returned_to_starter_station"));
                 }
-                yield teleported;
+                yield target != PlayerReturnPolicy.RallyTarget.NONE;
             }
         };
     }
@@ -254,6 +262,16 @@ public final class PlayerEvents {
                 player.sendSystemMessage(Component.translatable("message.lasttrain.starter_gun"));
             }
         }
+    }
+
+    /** 首次加入提示独立于可重试物资，确保登录重放不会重复教学。 */
+    private static void sendFirstJoinTutorial(ServerPlayer player, CampaignSavedData data) {
+        if (!data.markFirstJoined(player.getUUID())) {
+            return;
+        }
+        player.sendSystemMessage(Component.translatable("message.lasttrain.first_joined"));
+        player.sendSystemMessage(Component.translatable("message.lasttrain.tutorial.basic_controls"));
+        player.sendSystemMessage(Component.translatable("message.lasttrain.tutorial.train_controls"));
     }
 
     private static void sendCampaignSummary(ServerPlayer player, CampaignSavedData data) {
@@ -298,24 +316,34 @@ public final class PlayerEvents {
         }
     }
 
-    private static boolean teleportToStarterStation(
+    private static PlayerReturnPolicy.RallyTarget teleportToRallyStation(
             ServerPlayer player,
             ServerLevel level,
             CampaignSavedData data) {
-        BlockPos safePos = data.starterStationBuilt()
+        Optional<BlockPos> activated = data.nearestActivatedStation()
+                .flatMap(origin -> findSafeReturnPosition(player, level, origin));
+        BlockPos starterOrigin = data.starterStationBuilt()
                 ? data.starterStationAnchor().offset(-7, 1, 3)
                 : level.getSharedSpawnPos();
-        Optional<BlockPos> resolved = findSafeReturnPosition(player, level, safePos);
-        if (resolved.isEmpty() && !safePos.equals(level.getSharedSpawnPos())) {
-            resolved = findSafeReturnPosition(
+        Optional<BlockPos> starter = findSafeReturnPosition(player, level, starterOrigin);
+        if (starter.isEmpty() && !starterOrigin.equals(level.getSharedSpawnPos())) {
+            starter = findSafeReturnPosition(
                     player,
                     level,
                     level.getSharedSpawnPos());
         }
-        if (resolved.isEmpty()) {
-            return false;
+        PlayerReturnPolicy.RallyTarget selection = PlayerReturnPolicy.selectRallyTarget(
+                false,
+                activated.isPresent(),
+                starter.isPresent());
+        BlockPos safePos = switch (selection) {
+            case ACTIVATED_STATION -> activated.orElseThrow();
+            case STARTER_STATION -> starter.orElseThrow();
+            case TRAIN, NONE -> null;
+        };
+        if (safePos == null) {
+            return PlayerReturnPolicy.RallyTarget.NONE;
         }
-        safePos = resolved.orElseThrow();
         level.getChunkAt(safePos);
         Vec3 target = Vec3.atBottomCenterOf(safePos);
         player.stopRiding();
@@ -331,7 +359,7 @@ public final class PlayerEvents {
             player.setDeltaMovement(Vec3.ZERO);
             player.fallDistance = 0.0F;
         }
-        return teleported;
+        return teleported ? selection : PlayerReturnPolicy.RallyTarget.NONE;
     }
 
     private static Optional<BlockPos> findSafeReturnPosition(

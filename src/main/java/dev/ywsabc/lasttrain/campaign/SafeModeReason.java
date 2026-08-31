@@ -6,6 +6,8 @@ import java.util.Optional;
 /** Persisted ownership of every condition currently holding SAFE_MODE. */
 public enum SafeModeReason {
     VEHICLE_STACK_UNAVAILABLE,
+    TRAIN_RECOVERY_IN_PROGRESS,
+    TRAIN_RECOVERY_BACKEND_FAILURE,
     REWARD_OUTBOX_OVERFLOW,
     SAVE_INTEGRITY,
     UNKNOWN;

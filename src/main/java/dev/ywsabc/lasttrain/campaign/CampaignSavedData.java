@@ -20,6 +20,7 @@ import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -55,6 +56,7 @@ public final class CampaignSavedData extends SavedData {
     public static final int MAX_PENDING_CLEANUPS = 64;
     public static final int MAX_TEAM_MEMBERS = 128;
     public static final int MAX_INTEGRITY_EVENTS = 32;
+    public static final int MAX_PREPARED_STATIONS = 32;
     /** How many segments ahead of the realized head the planner commits. */
     public static final int DEFAULT_ROUTE_PLAN_AHEAD = 8;
     /** Hard deserialization cap for the pending route plan list. */
@@ -120,6 +122,13 @@ public final class CampaignSavedData extends SavedData {
     private int lastRescueDay;
     private int trainMissingTicks;
     private int trainImmobileTicks;
+    private TrainRecoveryPolicy.RescuePhase trainRescuePhase =
+            TrainRecoveryPolicy.RescuePhase.NONE;
+    private int trainRescueTargetSegment;
+    private int trainRescueVerificationTicks;
+    private int activatedStationSegment;
+    private long activatedStationAnchor;
+    private final List<PreparedStation> preparedStations = new ArrayList<>();
     private int effectivePlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int pendingPlayers = PopulationScalingPolicy.MIN_PLAYERS;
     private int scalingHoldTicks;
@@ -142,6 +151,7 @@ public final class CampaignSavedData extends SavedData {
     private TeamPermissionPolicy.Vote pendingTeamVote;
     private final Set<UUID> starterKitRecipients = new HashSet<>();
     private final Set<UUID> starterGunRecipients = new HashSet<>();
+    private final Set<UUID> firstJoinedPlayers = new HashSet<>();
 
     public CampaignSavedData() {
     }
@@ -272,6 +282,32 @@ public final class CampaignSavedData extends SavedData {
                 tag.getInt("train_immobile_ticks"),
                 0,
                 TrainRecoveryPolicy.MAX_TRACKED_TICKS);
+        String rawRescuePhase = tag.getString("train_rescue_phase");
+        data.trainRescuePhase = TrainRecoveryPolicy.RescuePhase.parse(rawRescuePhase)
+                .orElse(TrainRecoveryPolicy.RescuePhase.NONE);
+        if (!rawRescuePhase.isBlank()
+                && TrainRecoveryPolicy.RescuePhase.parse(rawRescuePhase).isEmpty()) {
+            data.recordCorruptSave("train_rescue_phase:unknown_enum");
+        }
+        data.trainRescueTargetSegment = Math.clamp(
+                tag.getInt("train_rescue_target_segment"),
+                0,
+                MAX_ROUTE_SEGMENT);
+        data.trainRescueVerificationTicks = Math.clamp(
+                tag.getInt("train_rescue_verification_ticks"),
+                0,
+                TrainRecoveryPolicy.VERIFICATION_TIMEOUT_TICKS);
+        if (data.trainRescuePhase != TrainRecoveryPolicy.RescuePhase.NONE) {
+            // 未决救援必须继续持有自己的 SAFE_MODE 原因，旧快照或手工编辑
+            // 不能让世界导演在物理车体尚未归位时恢复运行。
+            data.safeModeReasons.add(SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS);
+        }
+        data.activatedStationSegment = Math.clamp(
+                tag.getInt("activated_station_segment"),
+                0,
+                MAX_ROUTE_SEGMENT);
+        data.activatedStationAnchor = tag.getLong("activated_station_anchor");
+        loadPreparedStations(tag, data);
         data.effectivePlayers = PopulationScalingPolicy.clampPlayers(
                 tag.getInt("scaling_effective_players"));
         data.pendingPlayers = PopulationScalingPolicy.clampPlayers(
@@ -308,6 +344,7 @@ public final class CampaignSavedData extends SavedData {
                 : 0L;
         loadUuidSet(tag, "starter_kit_recipients", data.starterKitRecipients);
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
+        loadUuidSet(tag, "first_joined", data.firstJoinedPlayers);
         loadOptionalState(tag, registries, data);
         loadRoutePlanState(tag, data);
         return loadedSchema;
@@ -355,6 +392,12 @@ public final class CampaignSavedData extends SavedData {
         tag.putInt("last_rescue_day", lastRescueDay);
         tag.putInt("train_missing_ticks", trainMissingTicks);
         tag.putInt("train_immobile_ticks", trainImmobileTicks);
+        tag.putString("train_rescue_phase", trainRescuePhase.serializedName());
+        tag.putInt("train_rescue_target_segment", trainRescueTargetSegment);
+        tag.putInt("train_rescue_verification_ticks", trainRescueVerificationTicks);
+        tag.putInt("activated_station_segment", activatedStationSegment);
+        tag.putLong("activated_station_anchor", activatedStationAnchor);
+        tag.put("prepared_stations", savePreparedStations());
         tag.putInt("scaling_effective_players", effectivePlayers);
         tag.putInt("scaling_pending_players", pendingPlayers);
         tag.putInt("scaling_hold_ticks", scalingHoldTicks);
@@ -365,6 +408,7 @@ public final class CampaignSavedData extends SavedData {
         tag.putLong("infection_ticks", infectionTicks);
         tag.put("starter_kit_recipients", saveUuidSet(starterKitRecipients));
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
+        tag.put("first_joined", saveUuidSet(firstJoinedPlayers));
         saveOptionalState(tag, registries);
         saveRoutePlanState(tag);
         return tag;
@@ -906,10 +950,43 @@ public final class CampaignSavedData extends SavedData {
         return entries;
     }
 
+    /** 加载尚未被列车抵达的已生成安全站台；损坏或越界条目直接丢弃。 */
+    private static void loadPreparedStations(CompoundTag tag, CampaignSavedData data) {
+        if (data.activatedStationSegment > data.routeSegment) {
+            data.recordCorruptSave("activated_station_segment:ahead_of_route");
+            data.activatedStationSegment = 0;
+            data.activatedStationAnchor = 0L;
+        }
+        ListTag entries = tag.getList("prepared_stations", Tag.TAG_COMPOUND);
+        for (int index = 0;
+                index < entries.size() && data.preparedStations.size() < MAX_PREPARED_STATIONS;
+                index++) {
+            PreparedStation station = PreparedStation.load(entries.getCompound(index));
+            if (station == null
+                    || station.segment() <= data.activatedStationSegment
+                    || station.segment() > data.generatedRouteSegment) {
+                continue;
+            }
+            boolean duplicate = data.preparedStations.stream()
+                    .anyMatch(existing -> existing.segment() == station.segment());
+            if (!duplicate) {
+                data.preparedStations.add(station);
+            }
+        }
+        data.preparedStations.sort(java.util.Comparator.comparingInt(PreparedStation::segment));
+    }
+
+    private ListTag savePreparedStations() {
+        ListTag entries = new ListTag();
+        preparedStations.forEach(station -> entries.add(station.save()));
+        return entries;
+    }
+
     private static void validateKnownRootTypes(CompoundTag tag, CampaignSavedData data) {
         validateTypes(tag, data, Tag.TAG_STRING,
                 "campaign_id", "mode", "status", "active_key_mission",
-                "finale_mission_id", "starter_train_sublevel_id", "captain_id");
+                "finale_mission_id", "starter_train_sublevel_id", "captain_id",
+                "train_rescue_phase");
         validateTypes(tag, data, Tag.TAG_COMPOUND,
                 "active_mission", "proposed_mission", "route_plan_state",
                 "pending_team_vote");
@@ -917,7 +994,8 @@ public final class CampaignSavedData extends SavedData {
                 "scheduled_key_missions", "starter_kit_recipients",
                 "starter_gun_recipients", "optional_missions", "reward_receipts",
                 "pending_cleanups", "mission_history", "team_members",
-                "safe_mode_reasons", "integrity_events");
+                "safe_mode_reasons", "integrity_events", "first_joined",
+                "prepared_stations");
         validateTypes(tag, data, Tag.TAG_ANY_NUMERIC,
                 "schema_version", "campaign_seed", "route_rules_version", "day",
                 "active_ticks_into_day", "total_active_ticks", "route_segment",
@@ -927,6 +1005,8 @@ public final class CampaignSavedData extends SavedData {
                 "starter_train_placed", "starter_train_assembled",
                 "starter_train_assembly_attempts", "rescue_count", "last_rescue_day",
                 "train_missing_ticks", "train_immobile_ticks",
+                "train_rescue_target_segment", "train_rescue_verification_ticks",
+                "activated_station_segment", "activated_station_anchor",
                 "scaling_effective_players", "scaling_pending_players",
                 "scaling_hold_ticks", "attention", "pursuit_distance",
                 "last_pursuit_route_segment", "infection_stage", "infection_ticks",
@@ -2358,10 +2438,78 @@ public final class CampaignSavedData extends SavedData {
         return true;
     }
 
+    /** 首次登录标记与物资领取分离，物资重试不会重复发送教学消息。 */
+    public boolean markFirstJoined(UUID playerId) {
+        Objects.requireNonNull(playerId, "playerId");
+        if (!firstJoinedPlayers.add(playerId)) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    public boolean hasFirstJoined(UUID playerId) {
+        return playerId != null && firstJoinedPlayers.contains(playerId);
+    }
+
     public void markStarterStationBuilt(BlockPos anchor) {
         starterStationBuilt = true;
         starterStationAnchor = anchor.asLong();
         setDirty();
+    }
+
+    /**
+     * 记录已生成但列车尚未抵达的安全站台。只有物理线路完整提交后才调用，
+     * 因而预计划但未落块的站点永远不会成为汇合点。
+     */
+    public boolean recordPreparedStation(int segment, BlockPos safeAnchor) {
+        Objects.requireNonNull(safeAnchor, "safeAnchor");
+        if (segment < 1 || segment > generatedRouteSegment) {
+            return false;
+        }
+        if (segment <= activatedStationSegment
+                || preparedStations.stream().anyMatch(station -> station.segment() == segment)) {
+            return false;
+        }
+        while (preparedStations.size() >= MAX_PREPARED_STATIONS) {
+            preparedStations.remove(0);
+        }
+        preparedStations.add(new PreparedStation(segment, safeAnchor.asLong()));
+        preparedStations.sort(java.util.Comparator.comparingInt(PreparedStation::segment));
+        setDirty();
+        return true;
+    }
+
+    /** 列车实际抵达后，把最近的已生成站台提升为持久化安全汇合点。 */
+    public boolean activatePreparedStationsThrough(int reachedSegment) {
+        int reached = Math.clamp(reachedSegment, 0, routeSegment);
+        PreparedStation newest = null;
+        Iterator<PreparedStation> iterator = preparedStations.iterator();
+        while (iterator.hasNext()) {
+            PreparedStation station = iterator.next();
+            if (station.segment() > reached) {
+                break;
+            }
+            newest = station;
+            iterator.remove();
+        }
+        if (newest == null || newest.segment() < activatedStationSegment) {
+            return false;
+        }
+        activatedStationSegment = newest.segment();
+        activatedStationAnchor = newest.anchor();
+        setDirty();
+        return true;
+    }
+
+    public Optional<BlockPos> nearestActivatedStation() {
+        return activatedStationSegment > 0
+                ? Optional.of(BlockPos.of(activatedStationAnchor))
+                : Optional.empty();
+    }
+
+    public int activatedStationSegment() {
+        return activatedStationSegment;
     }
 
     public void markStarterTrainPlaced() {
@@ -2453,17 +2601,86 @@ public final class CampaignSavedData extends SavedData {
     }
 
     /**
-     * Records one completed train rescue: increments the counter, starts the
-     * cooldown, applies the attention and threat costs and resets the
-     * detection timers. Refuses while the policy cooldown or count limit
-     * blocks another rescue.
+     * 登记一次物理救援请求并锁定当时的合法线路锚点。代价在车体完成归位并
+     * 通过坐标验证后才结算，避免“逻辑扣费成功、物理搬运失败”的半完成状态。
      */
-    public boolean applyTrainRescue() {
-        if (status != CampaignStatus.RUNNING
-                && status != CampaignStatus.SAFE_MODE) {
+    public boolean requestTrainRescue() {
+        if ((status != CampaignStatus.RUNNING
+                        && status != CampaignStatus.SAFE_MODE)
+                || trainRescuePhase != TrainRecoveryPolicy.RescuePhase.NONE
+                || !starterTrainAssembled
+                || starterTrainSublevelId == null) {
+            return false;
+        }
+        if (status == CampaignStatus.SAFE_MODE
+                && safeModeReasons.stream().anyMatch(reason ->
+                        reason != SafeModeReason.VEHICLE_STACK_UNAVAILABLE
+                                && reason != SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS
+                                && reason != SafeModeReason.TRAIN_RECOVERY_BACKEND_FAILURE)) {
             return false;
         }
         if (!TrainRecoveryPolicy.canRescue(rescueCount, lastRescueDay, day)) {
+            return false;
+        }
+        boolean confirmedFault = trainMissingTicks >= TrainRecoveryPolicy.MISSING_GRACE_TICKS
+                || trainImmobileTicks >= TrainRecoveryPolicy.IMMOBILE_GRACE_TICKS;
+        if (!confirmedFault) {
+            return false;
+        }
+        trainRescuePhase = TrainRecoveryPolicy.RescuePhase.REQUESTED;
+        trainRescueTargetSegment = rescueAnchorSegment();
+        trainRescueVerificationTicks = 0;
+        enterSafeMode(SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS);
+        setDirty();
+        return true;
+    }
+
+    /** 物理后端已接受 teleport，下一 tick 必须用集合点世界坐标复核。 */
+    public boolean markTrainRescueVerifying() {
+        if (trainRescuePhase != TrainRecoveryPolicy.RescuePhase.REQUESTED) {
+            return false;
+        }
+        trainRescuePhase = TrainRecoveryPolicy.RescuePhase.VERIFYING;
+        trainRescueVerificationTicks = 0;
+        setDirty();
+        return true;
+    }
+
+    /** 验证超时后回到可重入的请求阶段，再次执行同一锚点的幂等搬运。 */
+    public boolean retryTrainRescue() {
+        if (trainRescuePhase != TrainRecoveryPolicy.RescuePhase.VERIFYING) {
+            return false;
+        }
+        trainRescuePhase = TrainRecoveryPolicy.RescuePhase.REQUESTED;
+        trainRescueVerificationTicks = 0;
+        setDirty();
+        return true;
+    }
+
+    public int recordTrainRescueVerificationTick() {
+        if (trainRescuePhase != TrainRecoveryPolicy.RescuePhase.VERIFYING) {
+            return trainRescueVerificationTicks;
+        }
+        trainRescueVerificationTicks = Math.min(
+                TrainRecoveryPolicy.VERIFICATION_TIMEOUT_TICKS,
+                trainRescueVerificationTicks + 1);
+        setDirty();
+        return trainRescueVerificationTicks;
+    }
+
+    /** 反射适配器故障只增加自己拥有的原因，不覆盖其他 SAFE_MODE 原因。 */
+    public void markTrainRecoveryBackendFailure() {
+        if (trainRescuePhase != TrainRecoveryPolicy.RescuePhase.NONE) {
+            enterSafeMode(SafeModeReason.TRAIN_RECOVERY_BACKEND_FAILURE);
+        }
+    }
+
+    /**
+     * 仅在世界坐标验证通过后完成救援、扣除代价并解除救援拥有的安全模式。
+     */
+    public boolean completeTrainRescue() {
+        if (trainRescuePhase != TrainRecoveryPolicy.RescuePhase.VERIFYING
+                || !TrainRecoveryPolicy.canRescue(rescueCount, lastRescueDay, day)) {
             return false;
         }
         rescueCount++;
@@ -2474,6 +2691,11 @@ public final class CampaignSavedData extends SavedData {
                 TrainRecoveryPolicy.applyCosts(attention, threat);
         attention = costs.attention();
         threat = costs.threat();
+        trainRescuePhase = TrainRecoveryPolicy.RescuePhase.NONE;
+        trainRescueTargetSegment = 0;
+        trainRescueVerificationTicks = 0;
+        resolveSafeModeReason(SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS);
+        resolveSafeModeReason(SafeModeReason.TRAIN_RECOVERY_BACKEND_FAILURE);
         setDirty();
         return true;
     }
@@ -2918,6 +3140,18 @@ public final class CampaignSavedData extends SavedData {
         return trainImmobileTicks;
     }
 
+    public TrainRecoveryPolicy.RescuePhase trainRescuePhase() {
+        return trainRescuePhase;
+    }
+
+    public int trainRescueTargetSegment() {
+        return trainRescueTargetSegment;
+    }
+
+    public int trainRescueVerificationTicks() {
+        return trainRescueVerificationTicks;
+    }
+
     public enum TickOutcome {
         NONE,
         DAY_ADVANCED,
@@ -2927,6 +3161,27 @@ public final class CampaignSavedData extends SavedData {
         FINAL_DAY_ELAPSED,
         SIEGE_TRIGGERED,
         CAMPAIGN_COMPLETED
+    }
+
+    /** 已生成站台的最小持久记录；anchor 是玩家脚部的安全方块。 */
+    private record PreparedStation(int segment, long anchor) {
+        private CompoundTag save() {
+            CompoundTag tag = new CompoundTag();
+            tag.putInt("segment", segment);
+            tag.putLong("anchor", anchor);
+            return tag;
+        }
+
+        private static PreparedStation load(CompoundTag tag) {
+            if (!tag.contains("segment", Tag.TAG_INT)
+                    || !tag.contains("anchor", Tag.TAG_LONG)) {
+                return null;
+            }
+            int segment = tag.getInt("segment");
+            return segment >= 1 && segment <= MAX_ROUTE_SEGMENT
+                    ? new PreparedStation(segment, tag.getLong("anchor"))
+                    : null;
+        }
     }
 
     /**

@@ -202,9 +202,77 @@ public final class CampaignEvents {
                 moving,
                 playerInDanger,
                 activePlayers);
+        processPendingTrainRescue(server, data, activePlayers, playerInDanger);
         if (directive != lastTrainDirective) {
             lastTrainDirective = directive;
             LastTrain.LOGGER.info("Train recovery assessment: {}", directive);
+        }
+    }
+
+    /**
+     * 推进持久化救援状态机。物理搬运与完成扣费分处两个 tick，中途崩溃后
+     * REQUESTED/VERIFYING 都能安全重放；目标与当前车体附近有人时保持等待。
+     */
+    private static void processPendingTrainRescue(
+            MinecraftServer server,
+            CampaignSavedData data,
+            int activePlayers,
+            boolean playerNearCurrentTrain) {
+        TrainRecoveryPolicy.RescuePhase phase = data.trainRescuePhase();
+        if (activePlayers <= 0
+                || phase == TrainRecoveryPolicy.RescuePhase.NONE
+                || !SimurailTrainBootstrap.hasVehicleStack()
+                || data.starterTrainSublevelId() == null) {
+            return;
+        }
+
+        Vec3 target = TrainRecoveryPolicy.recoveryGatheringPoint(
+                data.starterStationAnchor(),
+                data.trainRescueTargetSegment());
+        boolean playerNearTarget = server.getPlayerList().getPlayers().stream()
+                .anyMatch(player -> !player.isSpectator()
+                        && TrainRecoveryPolicy.playerInDanger(player.distanceToSqr(target)));
+        if (playerNearCurrentTrain || playerNearTarget) {
+            return;
+        }
+
+        switch (phase) {
+            case REQUESTED -> {
+                server.overworld().getChunkAt(net.minecraft.core.BlockPos.containing(target));
+                SableTrainTracker.TrainRepositionResult result =
+                        SableTrainTracker.repositionOnRoute(
+                                server.overworld(),
+                                data.starterTrainSublevelId(),
+                                target);
+                if (result == SableTrainTracker.TrainRepositionResult.APPLIED) {
+                    data.markTrainRescueVerifying();
+                } else if (result == SableTrainTracker.TrainRepositionResult.BACKEND_FAILURE) {
+                    data.markTrainRecoveryBackendFailure();
+                }
+            }
+            case VERIFYING -> {
+                Optional<Vec3> actual = SableTrainTracker.recoveryReferencePoint(
+                        server.overworld(),
+                        data.starterTrainSublevelId());
+                if (actual.isPresent()
+                        && TrainRecoveryPolicy.recoveryPositionVerified(
+                                actual.orElseThrow(), target)
+                        && data.completeTrainRescue()) {
+                    lastTrainPosition = actual.orElseThrow();
+                    lastTrainPositionTick = server.getTickCount();
+                    IntegrationBridge.syncCampaignNumbers(server, data);
+                    broadcast(server, Component.translatable(
+                            "command.lasttrain.recover.applied",
+                            data.rescueCount(),
+                            data.attention(),
+                            data.threat()));
+                } else if (data.recordTrainRescueVerificationTick()
+                        >= TrainRecoveryPolicy.VERIFICATION_TIMEOUT_TICKS) {
+                    data.retryTrainRescue();
+                }
+            }
+            case NONE -> {
+            }
         }
     }
 

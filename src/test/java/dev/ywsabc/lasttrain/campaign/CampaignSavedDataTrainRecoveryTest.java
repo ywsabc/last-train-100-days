@@ -43,11 +43,11 @@ class CampaignSavedDataTrainRecoveryTest {
 
     @Test
     void recoveryFieldsRoundTripThroughNbt() {
-        CampaignSavedData data = new CampaignSavedData();
-        assertTrue(data.start());
-        assertTrue(data.applyTrainRescue());
-        for (int tick = 1; tick <= 40; tick++) {
-            data.observeTrain(true, true, true, false, false, 1);
+        CampaignSavedData data = recoverableCampaign();
+        assertTrue(data.requestTrainRescue());
+        assertTrue(data.markTrainRescueVerifying());
+        for (int tick = 1; tick <= 12; tick++) {
+            data.recordTrainRescueVerificationTick();
         }
 
         CampaignSavedData loaded = CampaignSavedData.load(
@@ -57,20 +57,26 @@ class CampaignSavedDataTrainRecoveryTest {
         assertEquals(data.lastRescueDay(), loaded.lastRescueDay());
         assertEquals(data.trainMissingTicks(), loaded.trainMissingTicks());
         assertEquals(data.trainImmobileTicks(), loaded.trainImmobileTicks());
+        assertEquals(data.trainRescuePhase(), loaded.trainRescuePhase());
+        assertEquals(data.trainRescueTargetSegment(), loaded.trainRescueTargetSegment());
+        assertEquals(data.trainRescueVerificationTicks(), loaded.trainRescueVerificationTicks());
+        assertEquals(CampaignStatus.SAFE_MODE, loaded.status());
+        assertTrue(loaded.safeModeReasons().contains(
+                SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS));
     }
 
     @Test
     void rescueAppliesCostsCooldownAndResetsDetectionTimers() {
-        CampaignSavedData data = new CampaignSavedData();
-        assertTrue(data.start());
-        for (int tick = 1; tick <= TrainRecoveryPolicy.MISSING_GRACE_TICKS; tick++) {
-            data.observeTrain(true, true, false, false, false, 1);
-        }
+        CampaignSavedData data = recoverableCampaign();
         assertEquals(
                 TrainRecoveryPolicy.Directive.RESCUE_READY,
                 data.observeTrain(true, true, false, false, false, 1));
 
-        assertTrue(data.applyTrainRescue());
+        assertTrue(data.requestTrainRescue());
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+        assertEquals(TrainRecoveryPolicy.RescuePhase.REQUESTED, data.trainRescuePhase());
+        assertTrue(data.markTrainRescueVerifying());
+        assertTrue(data.completeTrainRescue());
         assertEquals(1, data.rescueCount());
         assertEquals(data.day(), data.lastRescueDay());
         assertEquals(
@@ -79,26 +85,37 @@ class CampaignSavedDataTrainRecoveryTest {
         assertEquals(TrainRecoveryPolicy.RESCUE_THREAT_COST, data.threat());
         assertEquals(0, data.trainMissingTicks());
         assertEquals(0, data.trainImmobileTicks());
+        assertEquals(CampaignStatus.RUNNING, data.status());
+        assertEquals(TrainRecoveryPolicy.RescuePhase.NONE, data.trainRescuePhase());
 
-        assertFalse(data.applyTrainRescue());
+        assertFalse(data.requestTrainRescue());
 
         data.advanceDays(TrainRecoveryPolicy.RESCUE_COOLDOWN_DAYS);
-        assertTrue(data.applyTrainRescue());
+        confirmMissingTrain(data);
+        assertTrue(data.requestTrainRescue());
+        assertTrue(data.markTrainRescueVerifying());
+        assertTrue(data.completeTrainRescue());
         assertEquals(2, data.rescueCount());
     }
 
     @Test
     void rescueRefusesBeforeCampaignStartAndAtCountLimit() {
         CampaignSavedData data = new CampaignSavedData();
-        assertFalse(data.applyTrainRescue());
+        assertFalse(data.requestTrainRescue());
 
         assertTrue(data.start());
+        assertFalse(data.requestTrainRescue());
+        data.markStarterTrainAssembled(UUID.randomUUID());
         for (int rescue = 0; rescue < TrainRecoveryPolicy.RESCUE_COUNT_LIMIT; rescue++) {
-            assertTrue(data.applyTrainRescue());
+            confirmMissingTrain(data);
+            assertTrue(data.requestTrainRescue());
+            assertTrue(data.markTrainRescueVerifying());
+            assertTrue(data.completeTrainRescue());
             data.advanceDays(TrainRecoveryPolicy.RESCUE_COOLDOWN_DAYS);
         }
         data.advanceDays(TrainRecoveryPolicy.RESCUE_COOLDOWN_DAYS);
-        assertFalse(data.applyTrainRescue());
+        confirmMissingTrain(data);
+        assertFalse(data.requestTrainRescue());
         assertEquals(TrainRecoveryPolicy.RESCUE_COUNT_LIMIT, data.rescueCount());
     }
 
@@ -255,5 +272,70 @@ class CampaignSavedDataTrainRecoveryTest {
 
         assertEquals(CampaignStatus.SAFE_MODE, loaded.status());
         assertTrue(loaded.safeModeReasons().contains(SafeModeReason.UNKNOWN));
+    }
+
+    @Test
+    void verificationTimeoutRetriesTheSameDurableAnchor() {
+        CampaignSavedData data = recoverableCampaign();
+        assertTrue(data.advanceRouteTo(4));
+        assertTrue(data.requestTrainRescue());
+        int target = data.trainRescueTargetSegment();
+        assertTrue(data.markTrainRescueVerifying());
+
+        for (int tick = 0; tick < TrainRecoveryPolicy.VERIFICATION_TIMEOUT_TICKS; tick++) {
+            data.recordTrainRescueVerificationTick();
+        }
+        assertTrue(data.retryTrainRescue());
+        assertEquals(TrainRecoveryPolicy.RescuePhase.REQUESTED, data.trainRescuePhase());
+        assertEquals(target, data.trainRescueTargetSegment());
+        assertEquals(0, data.rescueCount());
+        assertEquals(CampaignStatus.SAFE_MODE, data.status());
+    }
+
+    @Test
+    void rescueCompletionClearsOnlyRecoveryOwnedSafeModeReasons() {
+        CampaignSavedData data = recoverableCampaign();
+        assertTrue(data.requestTrainRescue());
+        data.markTrainRecoveryBackendFailure();
+        assertTrue(data.safeModeReasons().contains(
+                SafeModeReason.TRAIN_RECOVERY_BACKEND_FAILURE));
+        assertTrue(data.markTrainRescueVerifying());
+        assertTrue(data.completeTrainRescue());
+
+        assertEquals(CampaignStatus.RUNNING, data.status());
+        assertFalse(data.safeModeReasons().contains(
+                SafeModeReason.TRAIN_RECOVERY_IN_PROGRESS));
+        assertFalse(data.safeModeReasons().contains(
+                SafeModeReason.TRAIN_RECOVERY_BACKEND_FAILURE));
+    }
+
+    @Test
+    void unrelatedSafeModeReasonRefusesPhysicalWorldMutation() {
+        CompoundTag legacy = new CompoundTag();
+        legacy.putInt("schema_version", CampaignSavedData.CURRENT_SCHEMA);
+        legacy.putString("campaign_id", UUID.randomUUID().toString());
+        legacy.putString("status", CampaignStatus.SAFE_MODE.name());
+        legacy.putBoolean("starter_train_assembled", true);
+        legacy.putString("starter_train_sublevel_id", UUID.randomUUID().toString());
+        legacy.putInt("train_missing_ticks", TrainRecoveryPolicy.MISSING_GRACE_TICKS);
+        CampaignSavedData loaded = CampaignSavedData.load(legacy, null);
+
+        assertTrue(loaded.safeModeReasons().contains(SafeModeReason.UNKNOWN));
+        assertFalse(loaded.requestTrainRescue());
+        assertEquals(TrainRecoveryPolicy.RescuePhase.NONE, loaded.trainRescuePhase());
+    }
+
+    private static CampaignSavedData recoverableCampaign() {
+        CampaignSavedData data = new CampaignSavedData();
+        assertTrue(data.start());
+        data.markStarterTrainAssembled(UUID.randomUUID());
+        confirmMissingTrain(data);
+        return data;
+    }
+
+    private static void confirmMissingTrain(CampaignSavedData data) {
+        for (int tick = 0; tick < TrainRecoveryPolicy.MISSING_GRACE_TICKS; tick++) {
+            data.observeTrain(true, true, false, false, false, 1);
+        }
     }
 }

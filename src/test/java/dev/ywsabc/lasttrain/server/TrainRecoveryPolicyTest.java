@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
+import dev.ywsabc.lasttrain.route.RouteGeometry;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.Test;
 
 class TrainRecoveryPolicyTest {
@@ -212,5 +215,43 @@ class TrainRecoveryPolicyTest {
         assertTrue(TrainRecoveryPolicy.playerInDanger(TrainRecoveryPolicy.PLAYER_DANGER_RADIUS_SQUARED));
         assertFalse(TrainRecoveryPolicy.playerInDanger(
                 TrainRecoveryPolicy.PLAYER_DANGER_RADIUS_SQUARED + 0.01D));
+    }
+
+    @Test
+    void physicalResetTargetKeepsTheWholeStarterTrainOnVerifiedTrack() {
+        BlockPos station = new BlockPos(100, 64, -30);
+
+        assertEquals(
+                Vec3.atBottomCenterOf(station.offset(-1, 3, 2)),
+                TrainRecoveryPolicy.recoveryGatheringPoint(station, 0));
+        assertEquals(
+                Vec3.atBottomCenterOf(station.offset(
+                        RouteGeometry.segmentStartOffset(3) + 2,
+                        3,
+                        2)),
+                TrainRecoveryPolicy.recoveryGatheringPoint(station, 3));
+    }
+
+    @Test
+    void uprightPoseTranslationAndCompletionToleranceAreDeterministic() {
+        Vec3 plotPoint = new Vec3(-1_020.5D, 3.0D, 2_050.5D);
+        Vec3 target = new Vec3(130.5D, 67.0D, -27.5D);
+        Vec3 pose = TrainRecoveryPolicy.recoveryPosePosition(plotPoint, target);
+
+        assertEquals(new Vec3(1_151.0D, 64.0D, -2_078.0D), pose);
+        assertTrue(TrainRecoveryPolicy.recoveryPositionVerified(target, target.add(0.5D, 0, 0)));
+        assertFalse(TrainRecoveryPolicy.recoveryPositionVerified(
+                target,
+                target.add(0.5001D, 0, 0)));
+    }
+
+    @Test
+    void rescuePhaseNamesRoundTripAndRejectCorruption() {
+        for (TrainRecoveryPolicy.RescuePhase phase : TrainRecoveryPolicy.RescuePhase.values()) {
+            assertEquals(
+                    phase,
+                    TrainRecoveryPolicy.RescuePhase.parse(phase.serializedName()).orElseThrow());
+        }
+        assertTrue(TrainRecoveryPolicy.RescuePhase.parse("broken").isEmpty());
     }
 }

@@ -58,6 +58,22 @@ class PlayerReturnPolicyTest {
                 decide(20, true, true, false, true, true));
     }
 
+    @Test
+    void rallySelectionPrefersTrainThenLatestStationThenStarter() {
+        assertEquals(
+                PlayerReturnPolicy.RallyTarget.TRAIN,
+                PlayerReturnPolicy.selectRallyTarget(true, true, true));
+        assertEquals(
+                PlayerReturnPolicy.RallyTarget.ACTIVATED_STATION,
+                PlayerReturnPolicy.selectRallyTarget(false, true, true));
+        assertEquals(
+                PlayerReturnPolicy.RallyTarget.STARTER_STATION,
+                PlayerReturnPolicy.selectRallyTarget(false, false, true));
+        assertEquals(
+                PlayerReturnPolicy.RallyTarget.NONE,
+                PlayerReturnPolicy.selectRallyTarget(false, false, false));
+    }
+
     private static PlayerReturnPolicy.Decision decide(
             int elapsed,
             boolean online,

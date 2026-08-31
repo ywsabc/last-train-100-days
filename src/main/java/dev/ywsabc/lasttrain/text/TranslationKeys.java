@@ -9,6 +9,7 @@ import dev.ywsabc.lasttrain.mission.MissionBriefing;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
+import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -80,6 +81,11 @@ public final class TranslationKeys {
 
     public static String booleanValue(boolean value) {
         return "common.lasttrain.boolean." + value;
+    }
+
+    public static String rescuePhase(TrainRecoveryPolicy.RescuePhase phase) {
+        return "recovery.lasttrain.phase."
+                + Objects.requireNonNull(phase, "phase").serializedName();
     }
 
     private static String lower(Enum<?> value) {

@@ -115,6 +115,24 @@ class RouteDirectorBranchCommitTest {
     }
 
     @Test
+    void physicallyCommittedStationBecomesAWaitingRallyPointUntilReached() {
+        CampaignSavedData data = started();
+        data.commitRoutePlans(List.of(station(1)));
+
+        assertTrue(RouteDirector.commitMaterializedSegment(data, 1, true, List.of(
+                result(TongDaTrackBridge.SubmissionStatus.ALREADY_COMPLETE, "complete"))));
+        assertTrue(data.nearestActivatedStation().isEmpty());
+
+        assertTrue(data.advanceRouteTo(1));
+        assertTrue(data.activatePreparedStationsThrough(1));
+        assertEquals(
+                RouteSegmentLayout.compute(STATION, 1, station(1))
+                        .platformAnchor()
+                        .offset(0, 1, 3),
+                data.nearestActivatedStation().orElseThrow());
+    }
+
+    @Test
     void branchRetryBudgetBoundsAttemptsAndStopsAtCompletion() {
         RouteSegmentLayout.BranchTrackSection section = new RouteSegmentLayout.BranchTrackSection(
                 new BlockPos(10, 64, 0),
@@ -176,6 +194,15 @@ class RouteDirectorBranchCommitTest {
                 List.of(
                         new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH),
                         new RouteExit(RouteExitKind.BRANCH, 24)));
+    }
+
+    private static RouteSegmentPlan station(int segment) {
+        return new RouteSegmentPlan(
+                segment,
+                CAMPAIGN_SEED,
+                SegmentTemplate.STATION,
+                List.of(new RoutePoi(RoutePoiType.STATION, 24)),
+                List.of(new RouteExit(RouteExitKind.MAIN_LINE, RouteGeometry.SEGMENT_LENGTH)));
     }
 
     private static CampaignSavedData started() {

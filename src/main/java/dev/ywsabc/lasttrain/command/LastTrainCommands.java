@@ -998,7 +998,9 @@ public final class LastTrainCommands {
                         data.trainImmobileTicks(),
                         data.rescueCount(),
                         data.lastRescueDay(),
-                        data.rescueAnchorSegment()),
+                        data.rescueAnchorSegment(),
+                        Component.translatable(TranslationKeys.rescuePhase(
+                                data.trainRescuePhase()))),
                 false);
         return 1;
     }
@@ -1011,21 +1013,17 @@ public final class LastTrainCommands {
                 TeamPermissionPolicy.Operation.TRAIN_RECOVERY)) {
             return 0;
         }
-        if (!data.applyTrainRescue()) {
+        if (!data.requestTrainRescue()) {
             context.getSource().sendFailure(
                     Component.translatable("command.lasttrain.recover.refused"));
             return 0;
         }
-        IntegrationBridge.syncCampaignNumbers(context.getSource().getServer(), data);
         context.getSource().sendSuccess(
                 () -> Component.translatable(
-                        "command.lasttrain.recover.applied",
-                        data.rescueCount(),
-                        data.rescueAnchorSegment(),
-                        data.attention(),
-                        data.threat()),
+                        "command.lasttrain.recover.requested",
+                        data.trainRescueTargetSegment()),
                 true);
-        return data.rescueCount();
+        return 1;
     }
 
     private static CampaignSavedData data(CommandContext<CommandSourceStack> context) {

@@ -13,6 +13,7 @@ import dev.ywsabc.lasttrain.mission.MissionBriefing;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
+import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -66,8 +67,16 @@ class TranslationResourcesTest {
         for (CampaignIntegrityPolicy.Severity value : CampaignIntegrityPolicy.Severity.values()) {
             assertPresent(keys, TranslationKeys.integritySeverity(value));
         }
+        for (TrainRecoveryPolicy.RescuePhase value : TrainRecoveryPolicy.RescuePhase.values()) {
+            assertPresent(keys, TranslationKeys.rescuePhase(value));
+        }
         assertPresent(keys, TranslationKeys.booleanValue(false));
         assertPresent(keys, TranslationKeys.booleanValue(true));
+        assertPresent(keys, "message.lasttrain.first_joined");
+        assertPresent(keys, "message.lasttrain.tutorial.basic_controls");
+        assertPresent(keys, "message.lasttrain.tutorial.train_controls");
+        assertPresent(keys, "message.lasttrain.returned_to_activated_station");
+        assertPresent(keys, "message.lasttrain.returned_to_starter_station");
     }
 
     private static Set<String> readKeys(String locale) throws IOException {

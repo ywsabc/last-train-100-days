@@ -2,6 +2,11 @@ package dev.ywsabc.lasttrain.server;
 
 import dev.ywsabc.lasttrain.campaign.CampaignStatus;
 import dev.ywsabc.lasttrain.campaign.PursuitPolicy;
+import dev.ywsabc.lasttrain.route.RouteGeometry;
+import java.util.Locale;
+import java.util.Optional;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Pure policy for recovering the physical train after loss, derailment or a
@@ -28,6 +33,8 @@ public final class TrainRecoveryPolicy {
     public static final double PLAYER_DANGER_RADIUS_SQUARED =
             PLAYER_DANGER_RADIUS * PLAYER_DANGER_RADIUS;
     public static final double MOVEMENT_EPSILON_SQUARED = 1.0E-2D;
+    public static final int VERIFICATION_TIMEOUT_TICKS = 40;
+    public static final double RECOVERY_POSITION_TOLERANCE_SQUARED = 0.25D;
 
     private TrainRecoveryPolicy() {
     }
@@ -106,6 +113,34 @@ public final class TrainRecoveryPolicy {
         return distanceSquared <= PLAYER_DANGER_RADIUS_SQUARED;
     }
 
+    /**
+     * 计算车体在指定救援区段上的集合点。车体最后一个转向架落在区段入口后
+     * 三格处，因此整列验证车都位于已生成轨道内；区段 0 则回到起点原位。
+     */
+    public static Vec3 recoveryGatheringPoint(BlockPos starterStationAnchor, int anchorSegment) {
+        int vehicleAnchorOffset = anchorSegment <= 0
+                ? 0
+                : Math.addExact(RouteGeometry.segmentStartOffset(anchorSegment), 3);
+        return Vec3.atBottomCenterOf(starterStationAnchor.offset(
+                vehicleAnchorOffset - 1,
+                3,
+                2));
+    }
+
+    /**
+     * Sable 的集合点保存在隐藏 plot 的绝对坐标中。列车回正为单位旋转后，
+     * 新 pose 平移量就是“目标世界坐标 - plot 坐标”。
+     */
+    public static Vec3 recoveryPosePosition(Vec3 plotGatheringPoint, Vec3 targetGatheringPoint) {
+        return targetGatheringPoint.subtract(plotGatheringPoint);
+    }
+
+    public static boolean recoveryPositionVerified(Vec3 actual, Vec3 expected) {
+        return actual != null
+                && expected != null
+                && actual.distanceToSqr(expected) <= RECOVERY_POSITION_TOLERANCE_SQUARED;
+    }
+
     public enum Directive {
         NONE,
         OBSERVING,
@@ -113,6 +148,28 @@ public final class TrainRecoveryPolicy {
         RESCUE_BLOCKED,
         COOLDOWN,
         SAFE_MODE
+    }
+
+    /** 可跨重启恢复的物理救援阶段。 */
+    public enum RescuePhase {
+        NONE,
+        REQUESTED,
+        VERIFYING;
+
+        public String serializedName() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+
+        public static Optional<RescuePhase> parse(String value) {
+            if (value == null || value.isBlank()) {
+                return Optional.of(NONE);
+            }
+            try {
+                return Optional.of(valueOf(value.trim().toUpperCase(Locale.ROOT)));
+            } catch (IllegalArgumentException ignored) {
+                return Optional.empty();
+            }
+        }
     }
 
     public record TrainSituation(

@@ -89,6 +89,7 @@ public final class RouteDirector {
         if (occupiedSegment > data.routeSegment()) {
             boolean hadMission = data.activeMission() != null;
             data.advanceRouteTo(occupiedSegment);
+            data.activatePreparedStationsThrough(data.routeSegment());
             server.getPlayerList().broadcastSystemMessage(
                     Component.translatable(
                             "message.lasttrain.route_advanced",
@@ -97,6 +98,9 @@ public final class RouteDirector {
             if (!hadMission && data.activeMission() != null) {
                 broadcastMission(server, data.activeMission());
             }
+        } else {
+            // 重启可能发生在逻辑里程写盘之后、站点激活写盘之前；重复提升是幂等的。
+            data.activatePreparedStationsThrough(data.routeSegment());
         }
 
         int desiredSegment = Math.max(
@@ -467,8 +471,17 @@ public final class RouteDirector {
         if (!commitEligible(mainlineComplete, branchResults)) {
             return false;
         }
+        // 必须在删掉已实现计划前取得站台坐标。只有完成主线和全部支线的
+        // 物理提交才会记录候选站，尚在预生成队列中的站不会用于玩家汇合。
+        RouteSegmentLayout layout = layoutFor(data, segment);
+        BlockPos safeStation = layout.hasPlatform()
+                ? layout.platformAnchor().offset(0, 1, 3)
+                : null;
         if (!data.markRouteSegmentGenerated(segment)) {
             return false;
+        }
+        if (safeStation != null) {
+            data.recordPreparedStation(segment, safeStation);
         }
         data.dropRoutePlanThrough(segment);
         return true;
