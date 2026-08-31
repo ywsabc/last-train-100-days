@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -37,8 +38,17 @@ public final class ActiveMission {
     private final Set<UUID> entityIds = new LinkedHashSet<>();
     private MissionStage stage;
     private int revision;
+    /** 当前阶段索引只会单调增加，已完成阶段不能回跳或被失败路径越过。 */
+    private int phaseIndex;
+    private int phaseStartedDay;
+    private int phaseFailures;
+    /** 当前阶段关键物品的单调代次；补发会使所有旧副本立即失效。 */
+    private long criticalItemGeneration;
+    private boolean criticalItemRedeemed;
     private int progress;
     private BlockPos site;
+    /** 道岔等线路任务的现场方向；普通任务为空。 */
+    private Direction objectiveDirection;
     private boolean worldPrepared;
     /** 旧存档兼容认领只运行一次；正常路径之后完全按 UUID 索引工作。 */
     private boolean entityIndexInitialized;
@@ -55,7 +65,13 @@ public final class ActiveMission {
             BlockPos site,
             boolean worldPrepared,
             long createdTick,
-            long deadlineTick) {
+            long deadlineTick,
+            int phaseIndex,
+            int phaseStartedDay,
+            int phaseFailures,
+            long criticalItemGeneration,
+            boolean criticalItemRedeemed,
+            Direction objectiveDirection) {
         this.id = Objects.requireNonNull(id, "id");
         this.type = Objects.requireNonNull(type, "type");
         this.stage = Objects.requireNonNull(stage, "stage");
@@ -63,8 +79,17 @@ public final class ActiveMission {
         this.createdDay = Math.max(1, createdDay);
         this.routeSegment = Math.max(0, routeSegment);
         this.target = Math.clamp(Math.max(1, target), 1, MAX_TARGET);
-        this.progress = Math.clamp(progress, 0, this.target);
+        this.phaseIndex = Math.clamp(
+                phaseIndex,
+                0,
+                this.type.phaseChain().size() - 1);
+        this.phaseStartedDay = Math.max(this.createdDay, phaseStartedDay);
+        this.phaseFailures = Math.max(0, phaseFailures);
+        this.criticalItemGeneration = Math.max(0L, criticalItemGeneration);
+        this.criticalItemRedeemed = criticalItemRedeemed;
+        this.progress = Math.clamp(progress, 0, currentPhaseTarget());
         this.site = site == null ? null : site.immutable();
+        this.objectiveDirection = objectiveDirection;
         // 没有稳定现场坐标就不能声称世界准备完成；旧档异常组合会在下一 tick
         // 重新分配现场并走幂等准备，而不是直接观察空气后误判完成。
         this.worldPrepared = worldPrepared && this.site != null;
@@ -96,7 +121,13 @@ public final class ActiveMission {
                 site,
                 worldPrepared,
                 0L,
-                Long.MAX_VALUE);
+                Long.MAX_VALUE,
+                0,
+                createdDay,
+                0,
+                0L,
+                false,
+                null);
     }
 
     public static ActiveMission create(MissionType type, int day, int routeSegment) {
@@ -189,7 +220,13 @@ public final class ActiveMission {
                 null,
                 false,
                 createdTick,
-                OptionalMissionPolicy.deadlineTick(createdTick, type));
+                OptionalMissionPolicy.deadlineTick(createdTick, type),
+                0,
+                day,
+                0,
+                0L,
+                false,
+                null);
     }
 
     public static ActiveMission load(CompoundTag tag, HolderLookup.Provider registries) {
@@ -202,21 +239,42 @@ public final class ActiveMission {
 
         MissionType type = MissionType.parse(tag.getString("type")).orElse(MissionType.RAIL_BREAK);
         int target = tag.contains("target") ? tag.getInt("target") : type.defaultTarget();
+        MissionStage loadedStage = MissionStage.fromSerializedName(tag.getString("stage"));
+        int loadedPhaseIndex = tag.contains("phase_index") ? tag.getInt("phase_index") : 0;
+        int loadedProgress = tag.getInt("progress");
+        // 旧版供电任务没有阶段字段。已经可提交的旧任务必须继续保持完成，避免
+        // 升级后重新关门并要求玩家从供电阶段重做。
+        if (!tag.contains("phase_index")
+                && type.sequential()
+                && loadedStage == MissionStage.READY_TO_TURN_IN) {
+            loadedPhaseIndex = type.phaseChain().size() - 1;
+            loadedProgress = type.phaseTarget(loadedPhaseIndex, target);
+        }
         ActiveMission mission = new ActiveMission(
                 id,
                 type,
-                MissionStage.fromSerializedName(tag.getString("stage")),
+                loadedStage,
                 tag.getInt("revision"),
                 tag.getInt("created_day"),
                 tag.getInt("route_segment"),
-                tag.getInt("progress"),
+                loadedProgress,
                 target,
                 tag.contains("site") ? BlockPos.of(tag.getLong("site")) : null,
                 tag.getBoolean("world_prepared"),
                 tag.getLong("created_tick"),
                 tag.contains("deadline_tick")
                         ? tag.getLong("deadline_tick")
-                        : Long.MAX_VALUE);
+                        : Long.MAX_VALUE,
+                loadedPhaseIndex,
+                tag.contains("phase_started_day")
+                        ? tag.getInt("phase_started_day")
+                        : tag.getInt("created_day"),
+                tag.getInt("phase_failures"),
+                tag.getLong("critical_item_generation"),
+                tag.getBoolean("critical_item_redeemed"),
+                tag.contains("objective_direction")
+                        ? Direction.byName(tag.getString("objective_direction"))
+                        : null);
         for (int index : tag.getIntArray("repair_indices")) {
             mission.recordRepairIndex(index);
         }
@@ -247,6 +305,14 @@ public final class ActiveMission {
         tag.putInt("route_segment", routeSegment);
         tag.putInt("progress", progress);
         tag.putInt("target", target);
+        tag.putInt("phase_index", phaseIndex);
+        tag.putInt("phase_started_day", phaseStartedDay);
+        tag.putInt("phase_failures", phaseFailures);
+        tag.putLong("critical_item_generation", criticalItemGeneration);
+        tag.putBoolean("critical_item_redeemed", criticalItemRedeemed);
+        if (objectiveDirection != null) {
+            tag.putString("objective_direction", objectiveDirection.getName());
+        }
         if (site != null) {
             tag.putLong("site", site.asLong());
         }
@@ -338,37 +404,97 @@ public final class ActiveMission {
     }
 
     public boolean addProgress(int amount) {
+        return addProgress(amount, phaseStartedDay);
+    }
+
+    public boolean addProgress(int amount, int currentDay) {
         if (stage.terminal()
                 || type == MissionType.SALVAGE_CAR
                 || amount <= 0) {
             return false;
         }
 
-        int previous = progress;
-        progress = Math.min(target, progress + amount);
-        normalizeStage();
-        return progress != previous;
+        int previousProgress = progress;
+        int previousPhase = phaseIndex;
+        progress = (int) Math.min(
+                currentPhaseTarget(),
+                (long) progress + amount);
+        advancePhaseIfComplete(currentDay);
+        return progress != previousProgress || phaseIndex != previousPhase;
     }
 
     public boolean setObservedProgress(int observedProgress) {
+        return setObservedProgress(observedProgress, phaseStartedDay);
+    }
+
+    public boolean setObservedProgress(int observedProgress, int currentDay) {
         if (stage.terminal() || type == MissionType.SALVAGE_CAR) {
             return false;
         }
 
-        int normalized = Math.clamp(observedProgress, 0, target);
+        int normalized = Math.clamp(observedProgress, 0, currentPhaseTarget());
         if (normalized == progress) {
             return false;
         }
         progress = normalized;
-        normalizeStage();
+        advancePhaseIfComplete(currentDay);
+        return true;
+    }
+
+    /**
+     * 记录当前阶段失败并降低本阶段进度。阶段索引保持不变，因此生成失败、目标
+     * 损坏或防守失利都只能重做当前步骤，绝不会误跳到下一阶段。
+     */
+    public boolean failCurrentPhase(int currentDay, int progressPenalty) {
+        if (stage != MissionStage.ACTIVE || progressPenalty < 0) {
+            return false;
+        }
+        progress = Math.max(0, progress - progressPenalty);
+        phaseFailures++;
+        phaseStartedDay = Math.max(phaseStartedDay, currentDay);
+        revision++;
+        return true;
+    }
+
+    /**
+     * 为当前阶段签发唯一有效代次。每次补发先推进代次，世界中迟到或复制出的旧
+     * 物品即使后来重新出现，也不能再通过验证。
+     */
+    public long issueCriticalItem() {
+        if (stage != MissionStage.ACTIVE || criticalItemRedeemed) {
+            return -1L;
+        }
+        if (criticalItemGeneration == Long.MAX_VALUE) {
+            return -1L;
+        }
+        criticalItemGeneration++;
+        revision++;
+        return criticalItemGeneration;
+    }
+
+    /** 当前代次只能核销一次；同代复制品在第一次成功后全部成为无效副本。 */
+    public boolean redeemCriticalItem(long generation) {
+        if (stage != MissionStage.ACTIVE
+                || criticalItemRedeemed
+                || generation <= 0L
+                || generation != criticalItemGeneration) {
+            return false;
+        }
+        criticalItemRedeemed = true;
+        revision++;
         return true;
     }
 
     public boolean assignSite(BlockPos newSite) {
+        return assignSite(newSite, null);
+    }
+
+    public boolean assignSite(BlockPos newSite, Direction direction) {
         if (site != null) {
             return false;
         }
         site = newSite.immutable();
+        objectiveDirection = direction;
         return true;
     }
 
@@ -381,7 +507,8 @@ public final class ActiveMission {
     }
 
     public void complete() {
-        progress = target;
+        phaseIndex = type.phaseChain().size() - 1;
+        progress = currentPhaseTarget();
         stage = MissionStage.COMPLETED;
         revision++;
     }
@@ -392,9 +519,26 @@ public final class ActiveMission {
                 || stage == MissionStage.REWARD_PENDING) {
             return;
         }
-        stage = progress() >= target
-                ? MissionStage.READY_TO_TURN_IN
-                : MissionStage.ACTIVE;
+        advancePhaseIfComplete(phaseStartedDay);
+    }
+
+    private void advancePhaseIfComplete(int currentDay) {
+        if (progress() < currentPhaseTarget()) {
+            stage = MissionStage.ACTIVE;
+            return;
+        }
+        if (phaseIndex + 1 < type.phaseChain().size()) {
+            phaseIndex++;
+            progress = 0;
+            phaseStartedDay = Math.max(phaseStartedDay, currentDay);
+            criticalItemGeneration = 0L;
+            criticalItemRedeemed = false;
+            revision++;
+            stage = MissionStage.ACTIVE;
+            return;
+        }
+        progress = currentPhaseTarget();
+        stage = MissionStage.READY_TO_TURN_IN;
     }
 
     public UUID id() {
@@ -426,11 +570,48 @@ public final class ActiveMission {
     }
 
     public int target() {
+        return currentPhaseTarget();
+    }
+
+    /** 创建任务时冻结的人数缩放首阶段目标。 */
+    public int primaryTarget() {
         return target;
+    }
+
+    public MissionType.MissionPhase currentPhase() {
+        return type.phaseChain().get(phaseIndex);
+    }
+
+    public int phaseIndex() {
+        return phaseIndex;
+    }
+
+    public int phaseStartedDay() {
+        return phaseStartedDay;
+    }
+
+    public int phaseFailures() {
+        return phaseFailures;
+    }
+
+    public long criticalItemGeneration() {
+        return criticalItemGeneration;
+    }
+
+    public boolean criticalItemRedeemed() {
+        return criticalItemRedeemed;
+    }
+
+    private int currentPhaseTarget() {
+        return Math.clamp(type.phaseTarget(phaseIndex, target), 1, MAX_TARGET);
     }
 
     public BlockPos site() {
         return site;
+    }
+
+    public Direction objectiveDirection() {
+        return objectiveDirection;
     }
 
     public boolean worldPrepared() {

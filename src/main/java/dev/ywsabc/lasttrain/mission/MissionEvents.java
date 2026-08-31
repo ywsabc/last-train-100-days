@@ -39,7 +39,7 @@ public final class MissionEvents {
         if (!(event.getEntity() instanceof Zombie zombie)
                 || !(event.getSource().getEntity() instanceof ServerPlayer)
                 || mission == null
-                || mission.type() != MissionType.ZOMBIE_BLOCKADE
+                || !MissionWorldDirector.isDefenseMission(mission)
                 || mission.stage() != MissionStage.ACTIVE
                 || !zombie.getTags().contains(MissionWorldDirector.missionEntityTag(mission))) {
             return;
@@ -66,6 +66,12 @@ public final class MissionEvents {
             return;
         }
         ActiveMission mission = data.activeMission();
+        if (event.getEntity() instanceof ItemEntity criticalDrop
+                && CriticalMissionItemDirector.isInvalidFor(mission, criticalDrop.getItem())) {
+            // 旧任务、旧阶段和旧补发代次的迟到副本在进入世界时直接失效。
+            event.setCanceled(true);
+            return;
+        }
         if (event.getEntity() instanceof ItemEntity droppedItem
                 && level == level.getServer().overworld()
                 && MissionWorldDirector.isRegeneratedMissionDrop(
@@ -80,7 +86,7 @@ public final class MissionEvents {
         }
 
         if (event.getEntity() instanceof Zombie zombie) {
-            if (mission != null && mission.type() == MissionType.ZOMBIE_BLOCKADE) {
+            if (MissionWorldDirector.isDefenseMission(mission)) {
                 String activeTag = MissionWorldDirector.missionEntityTag(mission);
                 if (zombie.getTags().contains(activeTag)) {
                     if (!data.registerMissionEntity(mission.id(), zombie.getUUID())) {
@@ -226,6 +232,22 @@ public final class MissionEvents {
 
         CampaignSavedData data = CampaignSavedData.get(level.getServer());
         if (!CampaignTickGuard.allowsWorldWrite(data, "mission.event.salvage_repair")) {
+            return;
+        }
+        ActiveMission active = data.activeMission();
+        if (active != null
+                && active.site() != null
+                && CriticalMissionItemDirector.controlPos(active).equals(event.getPos())) {
+            event.setCanceled(true);
+            if (CriticalMissionItemDirector.tryRedeem(
+                    data,
+                    active,
+                    event.getPos(),
+                    event.getItemStack())) {
+                player.displayClientMessage(
+                        Component.translatable("message.lasttrain.critical_item_redeemed"),
+                        true);
+            }
             return;
         }
         for (ActiveMission mission : data.optionalMissions()) {

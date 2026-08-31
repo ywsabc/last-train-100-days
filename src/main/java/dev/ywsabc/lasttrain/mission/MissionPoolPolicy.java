@@ -33,7 +33,7 @@ public final class MissionPoolPolicy {
     public static final List<MissionType> MAINLINE_TYPES = List.of(
             MissionType.RAIL_BREAK,
             MissionType.STATION_POWER,
-            MissionType.STATION_GATE,
+            MissionType.TRACK_CLEARANCE,
             MissionType.SUPPLY_RECOVERY,
             MissionType.ZOMBIE_BLOCKADE);
 

@@ -135,7 +135,10 @@ class CampaignHundredDaySmokeTest {
                 }
                 return;
             }
-            assertTrue(data.addMissionProgress(mission.target()));
+            do {
+                assertTrue(data.addMissionProgress(mission.target()));
+                mission = data.activeMission();
+            } while (mission != null && mission.stage() == MissionStage.ACTIVE);
             assertTrue(data.turnInMission());
         }
         fail("active mission settlement did not converge");

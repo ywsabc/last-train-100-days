@@ -46,6 +46,11 @@ public final class TranslationKeys {
                 + lower(Objects.requireNonNull(stage, "stage"));
     }
 
+    public static String missionPhase(MissionType.MissionPhase phase) {
+        return MISSION_PREFIX + "phase."
+                + lower(Objects.requireNonNull(phase, "phase"));
+    }
+
     public static String attention(PursuitPolicy.AttentionLevel level) {
         return "attention.lasttrain."
                 + lower(Objects.requireNonNull(level, "level"));

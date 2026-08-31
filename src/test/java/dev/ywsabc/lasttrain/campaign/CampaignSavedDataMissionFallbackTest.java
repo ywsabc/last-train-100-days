@@ -14,7 +14,7 @@ class CampaignSavedDataMissionFallbackTest {
     void ordinaryMissionFailureClearsTheRoadblockAndAppliesThreat() {
         CampaignSavedData data = new CampaignSavedData();
         assertTrue(data.start());
-        assertTrue(data.createMission(MissionType.STATION_GATE));
+        assertTrue(data.createMission(MissionType.TRACK_CLEARANCE));
         assertNotNull(data.activeMission());
 
         assertTrue(data.failMission(6));

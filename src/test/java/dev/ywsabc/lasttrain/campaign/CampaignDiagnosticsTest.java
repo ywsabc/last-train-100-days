@@ -27,6 +27,7 @@ class CampaignDiagnosticsTest {
         assertEquals(data.routeSegment() - data.expectedRouteSegment(), snapshot.routeDeltaFromExpected());
         assertEquals(data.generatedRouteSegment() - data.routeSegment(), snapshot.generatedLead());
         assertEquals(MissionType.RAIL_BREAK, mission.type());
+        assertEquals(MissionType.MissionPhase.OBJECTIVE, mission.phase());
         assertEquals(data.activeMission().id(), mission.id());
         assertEquals(0, snapshot.pendingRewards());
         assertEquals(1, snapshot.missionEntities());

@@ -58,8 +58,16 @@ class FinaleWindowMissionMatrixTest {
         CampaignSavedData data = atDay(60);
         for (MissionType type : MissionType.values()) {
             if (type.occupiesMainlineSlot()) {
-                assertTrue(data.createMission(type), type.name());
-                data.clearMission();
+                if (type == MissionType.SWITCH_SIGNAL || type == MissionType.STATION_GATE) {
+                    assertFalse(
+                            data.createMission(type),
+                            type == MissionType.SWITCH_SIGNAL
+                                    ? "没有已物化道岔时不能凭空生成"
+                                    : "旧版独立开门类型不能再创建");
+                } else {
+                    assertTrue(data.createMission(type), type.name());
+                    data.clearMission();
+                }
             }
         }
     }

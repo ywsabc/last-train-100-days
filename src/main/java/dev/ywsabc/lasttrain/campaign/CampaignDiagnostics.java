@@ -120,6 +120,7 @@ public record CampaignDiagnostics(
             java.util.UUID id,
             MissionType type,
             MissionStage stage,
+            MissionType.MissionPhase phase,
             int progress,
             int target,
             int routeSegment) {
@@ -127,6 +128,7 @@ public record CampaignDiagnostics(
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(type, "type");
             Objects.requireNonNull(stage, "stage");
+            Objects.requireNonNull(phase, "phase");
         }
 
         private static MissionView from(ActiveMission mission) {
@@ -134,6 +136,7 @@ public record CampaignDiagnostics(
                     mission.id(),
                     mission.type(),
                     mission.stage(),
+                    mission.currentPhase(),
                     mission.progress(),
                     mission.target(),
                     mission.routeSegment());

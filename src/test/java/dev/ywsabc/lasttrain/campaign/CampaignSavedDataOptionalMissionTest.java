@@ -126,7 +126,9 @@ class CampaignSavedDataOptionalMissionTest {
     void mainlineMissionsRefuseTheSameTypeBackToBack() {
         CampaignSavedData data = started();
         assertTrue(data.createMission(MissionType.STATION_POWER));
-        data.addMissionProgress(data.activeMission().target());
+        while (data.activeMission().stage() == MissionStage.ACTIVE) {
+            data.addMissionProgress(data.activeMission().target());
+        }
         assertTrue(data.turnInMission());
 
         assertFalse(data.createMission(MissionType.STATION_POWER));
@@ -144,7 +146,7 @@ class CampaignSavedDataOptionalMissionTest {
         assertEquals(MissionType.ZOMBIE_BLOCKADE, data.lastMainMissionType().orElseThrow());
 
         // Another mainline mission between two blockades reopens the gate.
-        assertTrue(data.createMission(MissionType.STATION_GATE));
+        assertTrue(data.createMission(MissionType.TRACK_CLEARANCE));
         data.addMissionProgress(data.activeMission().target());
         assertTrue(data.turnInMission());
         assertTrue(data.createMission(MissionType.ZOMBIE_BLOCKADE));

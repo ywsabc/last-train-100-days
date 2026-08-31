@@ -78,7 +78,7 @@ public final class MissionWorldDirector {
                 }
                 yield offsets;
             }
-            case ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> new int[0];
+            case SWITCH_SIGNAL, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> new int[0];
         };
     }
 
@@ -116,8 +116,13 @@ public final class MissionWorldDirector {
                 mission,
                 data.day(),
                 data.isFinaleMission(mission))) {
-            if (canClearFallbackWorld(server.overworld(), mission)
-                    && data.failMission(MissionFallbackPolicy.THREAT_PENALTY)) {
+            boolean settled = mission.type().sequential()
+                    ? data.failMissionPhase(
+                            mission.progress(),
+                            MissionFallbackPolicy.THREAT_PENALTY)
+                    : canClearFallbackWorld(server.overworld(), mission)
+                            && data.failMission(MissionFallbackPolicy.THREAT_PENALTY);
+            if (settled) {
                 server.getPlayerList().broadcastSystemMessage(
                         Component.translatable(
                                 "message.lasttrain.mission_failed",
@@ -150,7 +155,7 @@ public final class MissionWorldDirector {
             return;
         }
 
-        if (mission.type() == MissionType.ZOMBIE_BLOCKADE
+        if (isDefenseMission(mission)
                 && !mission.worldPrepared()
                 && !hasNearbyPlayer(server.overworld(), site)) {
             return;
@@ -174,6 +179,11 @@ public final class MissionWorldDirector {
         if (!repairPreparedMission(server.overworld(), mission)) {
             return;
         }
+        CriticalMissionItemDirector.reconcile(server, data, mission);
+        mission = data.activeMission();
+        if (mission == null) {
+            return;
+        }
         if (mission.stage() == MissionStage.READY_TO_TURN_IN) {
             // SavedData and chunk saves are not one atomic transaction. Repair
             // the passable route idempotently after a restart even when the
@@ -186,6 +196,7 @@ public final class MissionWorldDirector {
         }
         int observed = observeProgress(server.overworld(), mission);
         MissionStage before = mission.stage();
+        int phaseBefore = mission.phaseIndex();
         if (data.setMissionObservedProgress(observed)
                 && before != MissionStage.READY_TO_TURN_IN
                 && mission.stage() == MissionStage.READY_TO_TURN_IN) {
@@ -194,6 +205,13 @@ public final class MissionWorldDirector {
                     Component.translatable(
                             "message.lasttrain.mission_ready",
                             Component.translatable(TranslationKeys.mission(mission.type()))),
+                    false);
+        } else if (mission.phaseIndex() != phaseBefore) {
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.translatable(
+                            "message.lasttrain.mission_phase_advanced",
+                            Component.translatable(
+                                    TranslationKeys.missionPhase(mission.currentPhase()))),
                     false);
         }
     }
@@ -225,6 +243,7 @@ public final class MissionWorldDirector {
                 case STATION_POWER -> prepareStationPower(level, mission);
                 case STATION_GATE -> prepareStationGate(level, mission);
                 case TRACK_CLEARANCE -> prepareTrackClearance(level, mission);
+                case SWITCH_SIGNAL -> prepareSwitchSignal(level, mission);
                 case SUPPLY_RECOVERY -> prepareSupplyRecovery(level, mission);
                 case ZOMBIE_BLOCKADE -> prepareZombieBlockade(level, data, mission);
                 case RESCUE_SURVIVOR, SALVAGE_CAR -> true;
@@ -242,9 +261,16 @@ public final class MissionWorldDirector {
     private static int observeProgress(ServerLevel level, ActiveMission mission) {
         return switch (mission.type()) {
             case RAIL_BREAK -> observeRailRepair(level, mission);
-            case STATION_POWER -> observePoweredLevers(level, mission);
+            case STATION_POWER -> switch (mission.currentPhase()) {
+                case RESTORE_POWER -> observePoweredLevers(level, mission);
+                case OPEN_GATE -> observeOpenDoors(level, mission);
+                case DEFEND_GATE -> mission.progress();
+                default -> throw new IllegalStateException(
+                        "供电任务出现非法阶段：" + mission.currentPhase());
+            };
             case STATION_GATE -> observeOpenDoors(level, mission);
             case TRACK_CLEARANCE -> observeTrackClearance(level, mission);
+            case SWITCH_SIGNAL -> observeSwitchSignal(level, mission);
             case SUPPLY_RECOVERY -> observeRecoveredBarrels(level, mission);
             case ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR -> mission.progress();
         };
@@ -281,7 +307,7 @@ public final class MissionWorldDirector {
     }
 
     private static boolean prepareStationPower(ServerLevel level, ActiveMission mission) {
-        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
+        for (int offset : stationPowerOffsets(mission)) {
             BlockPos base = mission.site().offset(offset, -1, 4);
             level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
             level.setBlock(
@@ -298,14 +324,14 @@ public final class MissionWorldDirector {
                     UPDATE_ALL);
         }
         prepareRouteBarrier(level, mission.site());
-        return true;
+        return CriticalMissionItemDirector.prepare(level, mission);
     }
 
     private static boolean prepareStationGate(ServerLevel level, ActiveMission mission) {
-        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        int[] offsets = stationGateOffsets(mission);
         for (int index = 0; index < offsets.length; index++) {
             BlockPos lower = mission.site().offset(offsets[index], 0, 4);
-            placeGateDoor(level, lower, index);
+            placeGateDoor(level, lower, index, false);
             level.setBlock(
                     lower.offset(0, 0, -1),
                     state(
@@ -319,7 +345,12 @@ public final class MissionWorldDirector {
         return true;
     }
 
-    private static void placeGateDoor(ServerLevel level, BlockPos lower, int index) {
+    private static void placeGateDoor(
+            ServerLevel level,
+            BlockPos lower,
+            int index,
+            boolean open) {
+        String active = Boolean.toString(open);
         level.setBlock(
                 lower,
                 state(
@@ -327,8 +358,8 @@ public final class MissionWorldDirector {
                         "facing", "east",
                         "half", "lower",
                         "hinge", index == 0 ? "left" : "right",
-                        "open", "false",
-                        "powered", "false"),
+                        "open", active,
+                        "powered", active),
                 UPDATE_ALL);
         level.setBlock(
                 lower.above(),
@@ -337,9 +368,26 @@ public final class MissionWorldDirector {
                         "facing", "east",
                         "half", "upper",
                         "hinge", index == 0 ? "left" : "right",
-                        "open", "false",
-                        "powered", "false"),
+                        "open", active,
+                        "powered", active),
                 UPDATE_ALL);
+    }
+
+    private static int[] stationPowerOffsets(ActiveMission mission) {
+        return objectiveXOffsets(
+                MissionType.STATION_POWER,
+                mission.type().phaseTarget(0, mission.primaryTarget()));
+    }
+
+    private static int[] stationGateOffsets(ActiveMission mission) {
+        int phase = mission.type() == MissionType.STATION_POWER ? 1 : 0;
+        return objectiveXOffsets(
+                MissionType.STATION_GATE,
+                mission.type().phaseTarget(phase, mission.primaryTarget()));
+    }
+
+    private static int stationGateZ(ActiveMission mission) {
+        return mission.type() == MissionType.STATION_POWER ? -4 : 4;
     }
 
     private static boolean prepareSupplyRecovery(ServerLevel level, ActiveMission mission) {
@@ -390,6 +438,75 @@ public final class MissionWorldDirector {
         return true;
     }
 
+    /** 道岔任务现场直接锚定 RouteDirector 登记的真实分支交汇点。 */
+    private static boolean prepareSwitchSignal(ServerLevel level, ActiveMission mission) {
+        prepareRouteBarrier(level, mission.site());
+        return CriticalMissionItemDirector.prepare(level, mission);
+    }
+
+    static BlockPos switchSignalControlPos(ActiveMission mission, int index) {
+        if (index < 0 || index >= 2) {
+            throw new IllegalArgumentException("信号确认点索引必须是 0 或 1");
+        }
+        Direction branch = mission.objectiveDirection() == null
+                ? Direction.NORTH
+                : mission.objectiveDirection();
+        // 两处确认点沿真实分支方向展开，并向同一侧让出轨道净空。
+        return mission.site()
+                .relative(branch, index == 0 ? 1 : 4)
+                .relative(branch.getClockWise(), 2);
+    }
+
+    private static void repairSwitchSignal(ServerLevel level, ActiveMission mission) {
+        if (mission.currentPhase() == MissionType.MissionPhase.REPAIR_SWITCH_BOX) {
+            CriticalMissionItemDirector.prepare(level, mission);
+            return;
+        }
+        boolean locked = mission.stage() == MissionStage.READY_TO_TURN_IN;
+        for (int index = 0; index < 2; index++) {
+            BlockPos lever = switchSignalControlPos(mission, index);
+            BlockPos base = lever.below();
+            if (!level.getBlockState(base).is(Blocks.COPPER_BLOCK)) {
+                level.setBlock(base, Blocks.COPPER_BLOCK.defaultBlockState(), UPDATE_ALL);
+            }
+            if (!level.getBlockState(lever).is(Blocks.LEVER)
+                    || (locked && !propertyIs(level.getBlockState(lever), "powered", "true"))) {
+                level.setBlock(
+                        lever,
+                        state(
+                                Blocks.LEVER,
+                                "face", "floor",
+                                "facing", "north",
+                                "powered", Boolean.toString(locked)),
+                        UPDATE_ALL);
+            }
+        }
+    }
+
+    private static int observeSwitchSignal(ServerLevel level, ActiveMission mission) {
+        if (mission.currentPhase() == MissionType.MissionPhase.REPAIR_SWITCH_BOX) {
+            return mission.progress();
+        }
+        int confirmed = 0;
+        for (int index = 0; index < 2; index++) {
+            BlockState state = level.getBlockState(switchSignalControlPos(mission, index));
+            if (state.is(Blocks.LEVER) && propertyIs(state, "powered", "true")) {
+                confirmed++;
+            }
+        }
+        return confirmed;
+    }
+
+    private static boolean isSwitchSignalControl(ActiveMission mission, BlockPos pos) {
+        for (int index = 0; index < 2; index++) {
+            BlockPos control = switchSignalControlPos(mission, index);
+            if (pos.equals(control) || pos.equals(control.below())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean prepareZombieBlockade(
             ServerLevel level,
             CampaignSavedData data,
@@ -404,13 +521,20 @@ public final class MissionWorldDirector {
      * strand the campaign checkpoint.
      */
     private static boolean repairPreparedMission(ServerLevel level, ActiveMission mission) {
-        if (!mission.worldPrepared() || mission.stage() != MissionStage.ACTIVE) {
+        if (!mission.worldPrepared()
+                || (mission.stage() != MissionStage.ACTIVE
+                        && mission.stage() != MissionStage.READY_TO_TURN_IN)) {
             return true;
         }
         try {
             return switch (mission.type()) {
                 case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE,
                         RESCUE_SURVIVOR, SALVAGE_CAR -> true;
+                case SWITCH_SIGNAL -> {
+                    repairSwitchSignal(level, mission);
+                    ensureRouteBarrier(level, mission.site());
+                    yield true;
+                }
                 case STATION_POWER -> {
                     repairStationPower(level, mission);
                     ensureRouteBarrier(level, mission.site());
@@ -434,20 +558,23 @@ public final class MissionWorldDirector {
     }
 
     private static void repairStationPower(ServerLevel level, ActiveMission mission) {
-        for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
+        boolean powerLocked = mission.phaseIndex() > 0;
+        for (int offset : stationPowerOffsets(mission)) {
             BlockPos base = mission.site().offset(offset, -1, 4);
             if (!level.getBlockState(base).is(Blocks.IRON_BLOCK)) {
                 level.setBlock(base, Blocks.IRON_BLOCK.defaultBlockState(), UPDATE_ALL);
             }
             BlockPos lever = base.above();
-            if (!level.getBlockState(lever).is(Blocks.LEVER)) {
+            if (!level.getBlockState(lever).is(Blocks.LEVER)
+                    || (powerLocked
+                            && !propertyIs(level.getBlockState(lever), "powered", "true"))) {
                 level.setBlock(
                         lever,
                         state(
                                 Blocks.LEVER,
                                 "face", "floor",
                                 "facing", "north",
-                                "powered", "false"),
+                                "powered", Boolean.toString(powerLocked)),
                         UPDATE_ALL);
             }
             BlockPos lamp = base.offset(0, 0, 1);
@@ -455,25 +582,37 @@ public final class MissionWorldDirector {
                 level.setBlock(lamp, Blocks.REDSTONE_LAMP.defaultBlockState(), UPDATE_ALL);
             }
         }
+        if (mission.phaseIndex() > 0) {
+            repairStationGate(level, mission);
+        }
     }
 
     private static void repairStationGate(ServerLevel level, ActiveMission mission) {
-        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
+        int[] offsets = stationGateOffsets(mission);
+        boolean gateLockedOpen = mission.type() == MissionType.STATION_POWER
+                && mission.phaseIndex() > 1;
         for (int index = 0; index < offsets.length; index++) {
-            BlockPos lower = mission.site().offset(offsets[index], 0, 4);
+            BlockPos lower = mission.site().offset(
+                    offsets[index],
+                    0,
+                    stationGateZ(mission));
             if (!level.getBlockState(lower).is(Blocks.IRON_DOOR)
-                    || !level.getBlockState(lower.above()).is(Blocks.IRON_DOOR)) {
-                placeGateDoor(level, lower, index);
+                    || !level.getBlockState(lower.above()).is(Blocks.IRON_DOOR)
+                    || (gateLockedOpen
+                            && !propertyIs(level.getBlockState(lower), "open", "true"))) {
+                placeGateDoor(level, lower, index, gateLockedOpen);
             }
             BlockPos lever = lower.offset(0, 0, -1);
-            if (!level.getBlockState(lever).is(Blocks.LEVER)) {
+            if (!level.getBlockState(lever).is(Blocks.LEVER)
+                    || (gateLockedOpen
+                            && !propertyIs(level.getBlockState(lever), "powered", "true"))) {
                 level.setBlock(
                         lever,
                         state(
                                 Blocks.LEVER,
                                 "face", "floor",
                                 "facing", "north",
-                                "powered", "false"),
+                                "powered", Boolean.toString(gateLockedOpen)),
                         UPDATE_ALL);
             }
         }
@@ -509,7 +648,7 @@ public final class MissionWorldDirector {
             CampaignSavedData data,
             ActiveMission mission) {
         if (mission == null
-                || mission.type() != MissionType.ZOMBIE_BLOCKADE
+                || !isDefenseMission(mission)
                 || mission.stage() != MissionStage.ACTIVE
                 || !mission.worldPrepared()
                 || mission.site() == null) {
@@ -518,6 +657,13 @@ public final class MissionWorldDirector {
         return data.generatedRouteSegment()
                         >= RouteGeometry.missionSegment(mission.routeSegment())
                 && server.overworld().hasChunkAt(mission.site());
+    }
+
+    /** 普通尸潮任务和供电链最终防守共用有界实体对账。 */
+    static boolean isDefenseMission(ActiveMission mission) {
+        return mission != null
+                && (mission.type() == MissionType.ZOMBIE_BLOCKADE
+                        || mission.currentPhase() == MissionType.MissionPhase.DEFEND_GATE);
     }
 
     private static boolean reconcileZombieBlockade(
@@ -816,6 +962,10 @@ public final class MissionWorldDirector {
     }
 
     private static int observePoweredLevers(ServerLevel level, ActiveMission mission) {
+        if (CriticalMissionItemRegistry.requiredBy(mission).isPresent()
+                && !mission.criticalItemRedeemed()) {
+            return 0;
+        }
         int powered = 0;
         for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
             BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
@@ -829,7 +979,8 @@ public final class MissionWorldDirector {
     private static int observeOpenDoors(ServerLevel level, ActiveMission mission) {
         int opened = 0;
         for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
-            BlockState state = level.getBlockState(mission.site().offset(offset, 0, 4));
+            BlockState state = level.getBlockState(
+                    mission.site().offset(offset, 0, stationGateZ(mission)));
             if (state.is(Blocks.IRON_DOOR) && propertyIs(state, "open", "true")) {
                 opened++;
             }
@@ -897,7 +1048,7 @@ public final class MissionWorldDirector {
                             UPDATE_ALL);
                 }
             }
-            case STATION_POWER, STATION_GATE -> resolveRouteBarrier(level, mission);
+            case STATION_POWER, STATION_GATE, SWITCH_SIGNAL -> resolveRouteBarrier(level, mission);
             case TRACK_CLEARANCE -> {
                 for (int offset : objectiveXOffsets(mission.type(), mission.target())) {
                     BlockPos debris = mission.site().offset(offset, 1, 0);
@@ -1048,19 +1199,30 @@ public final class MissionWorldDirector {
         int dx = pos.getX() - site.getX();
         int dy = pos.getY() - site.getY();
         int dz = pos.getZ() - site.getZ();
-        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         return switch (mission.type()) {
             case STATION_POWER -> isRouteBarrierOffset(dx, dy, dz)
-                    || (containsObjectiveXOffset(offsets, dx)
+                    || pos.equals(CriticalMissionItemDirector.controlPos(mission))
+                    || pos.equals(CriticalMissionItemDirector.recoveryCratePos(mission))
+                    || (containsObjectiveXOffset(stationPowerOffsets(mission), dx)
                             && ((dy == -1 && (dz == 4 || dz == 5))
-                                    || (dy == 0 && dz == 4)));
+                                    || (dy == 0 && dz == 4)))
+                    || (containsObjectiveXOffset(stationGateOffsets(mission), dx)
+                            && ((dz == stationGateZ(mission) && dy >= -1 && dy <= 1)
+                                    || (dz == stationGateZ(mission) - 1
+                                            && dy >= -1 && dy <= 0)));
             case STATION_GATE -> isRouteBarrierOffset(dx, dy, dz)
-                    || (containsObjectiveXOffset(offsets, dx)
+                    || (containsObjectiveXOffset(stationGateOffsets(mission), dx)
                             && ((dz == 4 && dy >= -1 && dy <= 1)
                                     || (dz == 3 && dy >= -1 && dy <= 0)));
             case SUPPLY_RECOVERY -> dy == 0
                     && dz == 4
-                    && containsObjectiveXOffset(offsets, dx);
+                    && containsObjectiveXOffset(
+                            objectiveXOffsets(mission.type(), mission.target()),
+                            dx);
+            case SWITCH_SIGNAL -> isRouteBarrierOffset(dx, dy, dz)
+                    || pos.equals(CriticalMissionItemDirector.controlPos(mission))
+                    || pos.equals(CriticalMissionItemDirector.recoveryCratePos(mission))
+                    || isSwitchSignalControl(mission, pos);
             case SALVAGE_CAR -> OptionalMissionDirector.isProtectedSalvageBlock(mission, pos);
             case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR -> false;
         };
@@ -1118,9 +1280,9 @@ public final class MissionWorldDirector {
         int dx = pos.getX() - site.getX();
         int dy = pos.getY() - site.getY();
         int dz = pos.getZ() - site.getZ();
-        int[] offsets = objectiveXOffsets(mission.type(), mission.target());
         if ((mission.type() == MissionType.STATION_POWER
-                        || mission.type() == MissionType.STATION_GATE)
+                        || mission.type() == MissionType.STATION_GATE
+                        || mission.type() == MissionType.SWITCH_SIGNAL)
                 && isRouteBarrierOffset(dx, dy, dz)) {
             return dy == -1
                     ? RegeneratedMissionDrop.RED_CONCRETE
@@ -1128,18 +1290,38 @@ public final class MissionWorldDirector {
         }
         return switch (mission.type()) {
             case STATION_POWER -> {
-                if (containsObjectiveXOffset(offsets, dx) && dz == 4) {
+                if (pos.equals(CriticalMissionItemDirector.controlPos(mission))) {
+                    yield RegeneratedMissionDrop.CHISELED_STONE_BRICKS;
+                }
+                if (pos.equals(CriticalMissionItemDirector.recoveryCratePos(mission))) {
+                    yield RegeneratedMissionDrop.BARREL;
+                }
+                if (containsObjectiveXOffset(stationPowerOffsets(mission), dx) && dz == 4) {
                     yield dy == -1
                             ? RegeneratedMissionDrop.IRON_BLOCK
                             : dy == 0
                                     ? RegeneratedMissionDrop.LEVER
                                     : RegeneratedMissionDrop.NONE;
                 }
-                yield containsObjectiveXOffset(offsets, dx) && dy == -1 && dz == 5
-                        ? RegeneratedMissionDrop.REDSTONE_LAMP
+                if (containsObjectiveXOffset(stationPowerOffsets(mission), dx)
+                        && dy == -1
+                        && dz == 5) {
+                    yield RegeneratedMissionDrop.REDSTONE_LAMP;
+                }
+                if (containsObjectiveXOffset(stationGateOffsets(mission), dx)
+                        && dz == stationGateZ(mission)
+                        && dy >= 0
+                        && dy <= 1) {
+                    yield RegeneratedMissionDrop.IRON_DOOR;
+                }
+                yield containsObjectiveXOffset(stationGateOffsets(mission), dx)
+                                && dy == 0
+                                && dz == stationGateZ(mission) - 1
+                        ? RegeneratedMissionDrop.LEVER
                         : RegeneratedMissionDrop.NONE;
             }
             case STATION_GATE -> {
+                int[] offsets = stationGateOffsets(mission);
                 if (containsObjectiveXOffset(offsets, dx) && dz == 4 && dy >= 0 && dy <= 1) {
                     yield RegeneratedMissionDrop.IRON_DOOR;
                 }
@@ -1149,9 +1331,32 @@ public final class MissionWorldDirector {
             }
             case SUPPLY_RECOVERY -> dy == 0
                     && dz == 4
-                    && containsObjectiveXOffset(offsets, dx)
+                    && containsObjectiveXOffset(
+                            objectiveXOffsets(mission.type(), mission.target()),
+                            dx)
                     ? RegeneratedMissionDrop.BARREL
                     : RegeneratedMissionDrop.NONE;
+            case SWITCH_SIGNAL -> {
+                if (pos.equals(CriticalMissionItemDirector.controlPos(mission))) {
+                    yield RegeneratedMissionDrop.CHISELED_STONE_BRICKS;
+                }
+                if (pos.equals(CriticalMissionItemDirector.recoveryCratePos(mission))) {
+                    yield RegeneratedMissionDrop.BARREL;
+                }
+                if (isSwitchSignalControl(mission, pos)) {
+                    boolean base = false;
+                    for (int index = 0; index < 2; index++) {
+                        if (pos.equals(switchSignalControlPos(mission, index).below())) {
+                            base = true;
+                            break;
+                        }
+                    }
+                    yield base
+                            ? RegeneratedMissionDrop.COPPER_BLOCK
+                            : RegeneratedMissionDrop.LEVER;
+                }
+                yield RegeneratedMissionDrop.NONE;
+            }
             case RAIL_BREAK, TRACK_CLEARANCE, ZOMBIE_BLOCKADE, RESCUE_SURVIVOR, SALVAGE_CAR ->
                     RegeneratedMissionDrop.NONE;
         };
@@ -1165,7 +1370,9 @@ public final class MissionWorldDirector {
         LEVER,
         REDSTONE_LAMP,
         IRON_DOOR,
-        BARREL;
+        BARREL,
+        COPPER_BLOCK,
+        CHISELED_STONE_BRICKS;
 
         boolean matches(ItemStack stack) {
             return switch (this) {
@@ -1177,6 +1384,8 @@ public final class MissionWorldDirector {
                 case REDSTONE_LAMP -> stack.is(Blocks.REDSTONE_LAMP.asItem());
                 case IRON_DOOR -> stack.is(Blocks.IRON_DOOR.asItem());
                 case BARREL -> stack.is(Blocks.BARREL.asItem());
+                case COPPER_BLOCK -> stack.is(Blocks.COPPER_BLOCK.asItem());
+                case CHISELED_STONE_BRICKS -> stack.is(Blocks.CHISELED_STONE_BRICKS.asItem());
             };
         }
     }
