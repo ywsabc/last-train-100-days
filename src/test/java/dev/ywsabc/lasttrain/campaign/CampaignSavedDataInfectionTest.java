@@ -18,7 +18,7 @@ class CampaignSavedDataInfectionTest {
         assertEquals(InfectionPolicy.Stage.LATENT.index(), data.infectionStage());
 
         CompoundTag saved = data.save(new CompoundTag(), null);
-        assertEquals(11, saved.getInt("schema_version"));
+        assertEquals(CampaignSavedData.CURRENT_SCHEMA, saved.getInt("schema_version"));
         assertEquals(data.infectionStage(), saved.getInt("infection_stage"));
         assertEquals(data.infectionTicks(), saved.getLong("infection_ticks"));
 

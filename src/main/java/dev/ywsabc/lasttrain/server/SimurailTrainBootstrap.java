@@ -11,7 +11,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.Container;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -23,9 +26,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.fml.ModList;
 
 /**
- * Builds the starter vehicle from Create Simurail's own proven Ponder layout
- * and asks Create: Simulated's physics assembler to turn it into a Sable
- * sublevel.
+ * 按三节功能布局放置默认列车，并调用 Create: Simulated 装配为 Sable 子世界。
  *
  * <p>Simurail is an unreleased alpha dependency. The integration therefore
  * uses registry IDs and narrow reflected public surfaces instead of linking
@@ -38,7 +39,10 @@ public final class SimurailTrainBootstrap {
     private static final int NORMAL_RETRY_TICKS = 40;
     private static final int SLOW_RETRY_TICKS = 200;
     private static final int SLOW_RETRY_AFTER = 30;
-    private static final int STARTER_VEHICLE_BLOCKS = 24;
+    private static final int STARTER_VEHICLE_BLOCKS = StarterTrainLayout.expectedBlockCount();
+    private static final String TRAIN_SUPPLY_OPERATION_KEY =
+            "lasttrain_train_supply_operation";
+    private static final String TRAIN_SUPPLY_VERSION = "starter_train_v1";
     private static final String ASSEMBLER_CLASS =
             "dev.simulated_team.simulated.content.blocks.physics_assembler.PhysicsAssemblerBlockEntity";
     private static final String SUPER_GLUE_CLASS =
@@ -78,44 +82,56 @@ public final class SimurailTrainBootstrap {
         }
 
         BlockPos anchor = data.starterStationAnchor();
-        if (data.starterTrainPlaced()) {
-            if (isPonderCoreLayout(level, anchor)) {
-                ensureGatheringDeck(level, anchor);
-            }
-            if (sourceVehicleBlockCount(level, anchor) == 0) {
-                Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
-                        level,
-                        data.campaignId());
-                if (recovered.isPresent()) {
-                    SableTrainTracker.ensureForceLoaded(level, recovered.orElseThrow());
-                    data.markStarterTrainAssembled(recovered.orElseThrow());
-                    LastTrain.LOGGER.info(
-                            "Recovered starter Simurail train {} from its campaign tag",
-                            recovered.orElseThrow());
-                } else {
-                    LastTrain.LOGGER.error(
-                            "Starter Simurail source footprint is missing and no Sable sublevel "
-                                    + "has this campaign's starter-train tag; manual recovery is required");
-                }
-            }
-            return;
-        }
-
         if (!requiredBlocksPresent()) {
             LastTrain.LOGGER.error(
                     "Create Simurail is loaded but its alpha block set does not match commit e68481d");
             return;
         }
 
+        Optional<UUID> taggedTrain = SableTrainTracker.findTaggedStarterTrain(
+                level,
+                data.campaignId());
+        boolean completeSource = isExpectedVehicleLayout(level, anchor);
+        BootstrapTransactionPolicy.AssemblyDirective directive =
+                BootstrapTransactionPolicy.assemblyDirective(
+                        data.starterTrainAssemblyPhase(),
+                        completeSource,
+                        taggedTrain.isPresent());
         try {
-            placeTrackBed(level, anchor);
-            placePonderTestVehicle(level, anchor);
-            ensureAssemblyGlue(level, anchor);
-            data.markStarterTrainPlaced();
-            LastTrain.LOGGER.info(
-                    "Placed and glued the Create Simurail starter vehicle at {}; "
-                            + "waiting for Create track and Sable physics initialization",
-                    anchor);
+            switch (directive) {
+                case RECOVER_TRAIN -> {
+                    UUID recovered = taggedTrain.orElseThrow();
+                    SableTrainTracker.ensureForceLoaded(level, recovered);
+                    data.markStarterTrainAssembled(recovered);
+                    LastTrain.LOGGER.info(
+                            "Recovered starter Simurail train {} from its campaign tag",
+                            recovered);
+                }
+                case RESUME_ASSEMBLY -> {
+                    if (!ensureTrainSupplies(level, data, anchor)) {
+                        return;
+                    }
+                    ensureAssemblyGlue(level, anchor);
+                    data.markStarterTrainPlaced();
+                }
+                case PLACE_LAYOUT -> {
+                    placeTrackBed(level, anchor);
+                    placeStarterTrain(level, anchor);
+                    if (!ensureTrainSupplies(level, data, anchor)) {
+                        return;
+                    }
+                    ensureAssemblyGlue(level, anchor);
+                    data.markStarterTrainPlaced();
+                    LastTrain.LOGGER.info(
+                            "Placed and glued the three-unit Create Simurail starter train at {}; "
+                                    + "waiting for Create track and Sable physics initialization",
+                            anchor);
+                }
+                case WAIT_FOR_RECOVERY -> LastTrain.LOGGER.error(
+                        "Starter train transaction {} has neither a complete source layout nor "
+                                + "a tagged Sable train; refusing to place a duplicate",
+                        data.starterTrainAssemblyPhase());
+            }
         } catch (ReflectiveOperationException | RuntimeException | LinkageError exception) {
             LastTrain.LOGGER.error(
                     "Could not prepare the Create Simurail starter vehicle with the "
@@ -144,10 +160,8 @@ public final class SimurailTrainBootstrap {
         }
 
         BlockPos anchor = data.starterStationAnchor();
-        if (isPonderCoreLayout(level, anchor)) {
-            ensureGatheringDeck(level, anchor);
-        }
         int sourceBlocks = sourceVehicleBlockCount(level, anchor);
+        data.markStarterTrainAssemblyRequested();
         int attempt = data.recordStarterTrainAssemblyAttempt();
         if (sourceBlocks == 0) {
             Optional<UUID> recovered = SableTrainTracker.findTaggedStarterTrain(
@@ -197,15 +211,13 @@ public final class SimurailTrainBootstrap {
             Set<UUID> newSubLevels = SableTrainTracker.subLevelIds(level);
             newSubLevels.removeAll(subLevelsBefore);
 
-            // Simulated assembly is synchronous: the world blocks are moved
-            // into the newly-created sublevel before the method returns. Its
-            // public method clears lastException even when the helper returns
-            // null, so success requires both a new Sable ID and a fully-cleared
-            // complete 24-block source footprint.
+            // 装配同步移动世界方块；成功必须同时出现一个新 Sable 身份，且完整
+            // 三节源布局全部消失，不能把局部移动误记为已提交。
             int remainingBlocks = sourceVehicleBlockCount(level, anchor);
             if (remainingBlocks == 0 && newSubLevels.size() == 1) {
                 UUID trainId = newSubLevels.iterator().next();
-                Vec3 gatheringPoint = Vec3.atBottomCenterOf(anchor.offset(-1, 3, 2));
+                Vec3 gatheringPoint = Vec3.atBottomCenterOf(
+                        anchor.offset(StarterTrainLayout.gatheringPointOffset()));
                 if (!SableTrainTracker.tagStarterTrain(
                         level,
                         trainId,
@@ -278,75 +290,27 @@ public final class SimurailTrainBootstrap {
         }
     }
 
-    /**
-     * This is the compact demonstration supplied by Simurail's
-     * {@code physics_bogey/intro.nbt}, translated around the campaign spawn.
-     * Keeping the alpha vehicle deliberately small makes API breakage easy to
-     * diagnose before the campaign art pass replaces it with the full train.
-     */
-    private static void placePonderTestVehicle(ServerLevel level, BlockPos anchor) {
-        BlockState planks = Blocks.OAK_PLANKS.defaultBlockState();
-        BlockState bogey = state(
-                "simurail:physics_bogey",
-                "facing", "east",
-                "inverted", "false",
-                "waterlogged", "false");
-
-        place(level, anchor, -3, 2, 0, bogey);
-        place(level, anchor, 0, 2, 0, bogey);
-
-        for (int x = -3; x <= 0; x++) {
-            place(level, anchor, x, 2, -1, planks);
-            place(level, anchor, x, 2, 1, planks);
+    private static void placeStarterTrain(ServerLevel level, BlockPos anchor) {
+        for (StarterTrainLayout.BlockSpec spec : StarterTrainLayout.blocks()) {
+            BlockPos offset = spec.offset();
+            place(
+                    level,
+                    anchor,
+                    offset.getX(),
+                    offset.getY(),
+                    offset.getZ(),
+                    state(spec));
         }
-        // Extend the unobstructed east-side walkway into a genuine 3x3
-        // gathering deck. Its center has two clear blocks above it.
-        for (int x = -2; x <= 0; x++) {
-            place(level, anchor, x, 2, 2, planks);
-            place(level, anchor, x, 2, 3, planks);
-        }
-        place(level, anchor, -1, 2, 0, planks);
-
-        place(level, anchor, -2, 2, 0, state(
-                "create:encased_chain_drive",
-                "part", "start",
-                "axis", "x",
-                "axis_along_first", "true"));
-        place(level, anchor, -2, 3, 0, state(
-                "create:encased_chain_drive",
-                "part", "end",
-                "axis", "x",
-                "axis_along_first", "true"));
-        place(level, anchor, -1, 3, 0, state(
-                "simulated:red_portable_engine",
-                "facing", "west",
-                "lit", "false"));
-
-        BlockState lever = state(
-                "minecraft:lever",
-                "face", "floor",
-                "facing", "east",
-                "powered", "false");
-        place(level, anchor, -3, 3, -1, lever);
-        place(level, anchor, -3, 3, 0, lever);
-        place(level, anchor, -3, 3, 1, lever);
-
-        place(level, anchor, 0, 3, 0, state(
-                "simulated:physics_assembler",
-                "face", "floor",
-                "facing", "east"));
     }
 
     /**
-     * The Ponder scene moves an independent visual section and contains no glue
-     * entity. Simulated's real assembly traversal does not make ordinary
-     * planks sticky, so a real world needs one glue volume around the vehicle.
-     * Its lower face starts at y=2, deliberately excluding the track at y=1.
+     * 三节车体使用一个覆盖全部功能单元的胶水体积；下表面从 y=2 开始，明确排除
+     * y=1 的主线轨道，避免装配时把起点线路一起搬入 Sable 子世界。
      */
     private static void ensureAssemblyGlue(ServerLevel level, BlockPos anchor)
             throws ReflectiveOperationException {
-        BlockPos min = anchor.offset(-3, 2, -1);
-        BlockPos max = anchor.offset(0, 3, 3);
+        BlockPos min = anchor.offset(StarterTrainLayout.glueMinOffset());
+        BlockPos max = anchor.offset(StarterTrainLayout.glueMaxOffset());
         AABB bounds = new AABB(
                 min.getX(),
                 min.getY(),
@@ -387,7 +351,6 @@ public final class SimurailTrainBootstrap {
 
     private static boolean requiredBlocksPresent() {
         return blockExists("create:track")
-                && blockExists("create:encased_chain_drive")
                 && blockExists("simulated:physics_assembler")
                 && blockExists("simulated:red_portable_engine")
                 && blockExists("simurail:physics_bogey");
@@ -402,37 +365,16 @@ public final class SimurailTrainBootstrap {
         return key != null && key.toString().equals(id);
     }
 
-    private static boolean isPonderCoreLayout(ServerLevel level, BlockPos anchor) {
-        if (!isBlock(level, anchor.offset(-3, 2, 0), "simurail:physics_bogey")
-                || !isBlock(level, anchor.offset(0, 2, 0), "simurail:physics_bogey")
-                || !isBlock(level, anchor.offset(-2, 2, 0), "create:encased_chain_drive")
-                || !isBlock(level, anchor.offset(-2, 3, 0), "create:encased_chain_drive")
-                || !isBlock(level, anchor.offset(-1, 2, 0), "minecraft:oak_planks")
-                || !isBlock(level, anchor.offset(-1, 3, 0), "simulated:red_portable_engine")
-                || !isBlock(level, assemblerPos(anchor), "simulated:physics_assembler")) {
-            return false;
-        }
-        for (int x = -3; x <= 0; x++) {
-            if (!isBlock(level, anchor.offset(x, 2, -1), "minecraft:oak_planks")
-                    || !isBlock(level, anchor.offset(x, 2, 1), "minecraft:oak_planks")) {
+    private static boolean isExpectedVehicleLayout(ServerLevel level, BlockPos anchor) {
+        for (StarterTrainLayout.BlockSpec spec : StarterTrainLayout.blocks()) {
+            if (!isBlock(level, anchor.offset(spec.offset()), spec.blockId())) {
                 return false;
             }
         }
-        return isBlock(level, anchor.offset(-3, 3, -1), "minecraft:lever")
-                && isBlock(level, anchor.offset(-3, 3, 0), "minecraft:lever")
-                && isBlock(level, anchor.offset(-3, 3, 1), "minecraft:lever");
-    }
-
-    private static boolean isExpectedVehicleLayout(ServerLevel level, BlockPos anchor) {
-        if (!isPonderCoreLayout(level, anchor)) {
-            return false;
-        }
-        // The 3x3 deck spans x=-2..0 and z=1..3. Every floor block is
-        // solid oak and both blocks above every cell must remain clear.
-        for (int x = -2; x <= 0; x++) {
+        // 生活/医疗单元的 3x3 重连甲板必须保持两格净空。
+        for (int x = 4; x <= 6; x++) {
             for (int z = 1; z <= 3; z++) {
-                if (!isBlock(level, anchor.offset(x, 2, z), "minecraft:oak_planks")
-                        || !level.getBlockState(anchor.offset(x, 3, z)).isAir()
+                if (!level.getBlockState(anchor.offset(x, 3, z)).isAir()
                         || !level.getBlockState(anchor.offset(x, 4, z)).isAir()) {
                     return false;
                 }
@@ -441,49 +383,55 @@ public final class SimurailTrainBootstrap {
         return true;
     }
 
-    /** Idempotently upgrades the original 18-block proof vehicle's walkway. */
-    private static boolean ensureGatheringDeck(ServerLevel level, BlockPos anchor) {
-        for (int x = -2; x <= 0; x++) {
-            for (int z = 2; z <= 3; z++) {
-                BlockPos pos = anchor.offset(x, 2, z);
-                BlockState existing = level.getBlockState(pos);
-                if (!existing.isAir() && !isBlock(level, pos, "minecraft:oak_planks")) {
-                    return false;
-                }
-            }
-        }
-        for (int x = -2; x <= 0; x++) {
-            for (int z = 2; z <= 3; z++) {
-                BlockPos pos = anchor.offset(x, 2, z);
-                if (level.getBlockState(pos).isAir()) {
-                    level.setBlock(pos, Blocks.OAK_PLANKS.defaultBlockState(), UPDATE_ALL);
-                }
-            }
-        }
-        return true;
-    }
-
     private static int sourceVehicleBlockCount(ServerLevel level, BlockPos anchor) {
         int blocks = 0;
-        blocks += occupied(level, anchor.offset(-3, 2, 0));
-        blocks += occupied(level, anchor.offset(0, 2, 0));
-        blocks += occupied(level, anchor.offset(-2, 2, 0));
-        blocks += occupied(level, anchor.offset(-2, 3, 0));
-        blocks += occupied(level, anchor.offset(-1, 2, 0));
-        blocks += occupied(level, anchor.offset(-1, 3, 0));
-        blocks += occupied(level, assemblerPos(anchor));
-        for (int x = -3; x <= 0; x++) {
-            blocks += occupied(level, anchor.offset(x, 2, -1));
-            blocks += occupied(level, anchor.offset(x, 2, 1));
+        for (StarterTrainLayout.BlockSpec spec : StarterTrainLayout.blocks()) {
+            blocks += occupied(level, anchor.offset(spec.offset()));
         }
-        for (int x = -2; x <= 0; x++) {
-            blocks += occupied(level, anchor.offset(x, 2, 2));
-            blocks += occupied(level, anchor.offset(x, 2, 3));
-        }
-        blocks += occupied(level, anchor.offset(-3, 3, -1));
-        blocks += occupied(level, anchor.offset(-3, 3, 0));
-        blocks += occupied(level, anchor.offset(-3, 3, 1));
         return blocks;
+    }
+
+    /** 每个车载容器以自己的操作标记去重，补给按功能车厢分布且重启不重灌。 */
+    private static boolean ensureTrainSupplies(
+            ServerLevel level,
+            CampaignSavedData data,
+            BlockPos anchor) {
+        String operation = data.campaignId() + ":" + TRAIN_SUPPLY_VERSION;
+        for (BlockPos offset : StarterTrainLayout.supplies().stream()
+                .map(StarterTrainLayout.SupplySpec::containerOffset)
+                .distinct()
+                .toList()) {
+            BlockEntity blockEntity = level.getBlockEntity(anchor.offset(offset));
+            if (!(blockEntity instanceof Container container)) {
+                LastTrain.LOGGER.warn(
+                        "Starter train supply container is unavailable at {}",
+                        anchor.offset(offset));
+                return false;
+            }
+            if (operation.equals(blockEntity.getPersistentData()
+                    .getString(TRAIN_SUPPLY_OPERATION_KEY))) {
+                continue;
+            }
+            container.clearContent();
+            for (StarterTrainLayout.SupplySpec supply : StarterTrainLayout.supplies()) {
+                if (!supply.containerOffset().equals(offset)) {
+                    continue;
+                }
+                ResourceLocation itemId = ResourceLocation.parse(supply.itemId());
+                if (!BuiltInRegistries.ITEM.containsKey(itemId)) {
+                    return false;
+                }
+                Item item = BuiltInRegistries.ITEM.get(itemId);
+                container.setItem(
+                        supply.slot(),
+                        new ItemStack(item, supply.count()));
+            }
+            blockEntity.getPersistentData().putString(
+                    TRAIN_SUPPLY_OPERATION_KEY,
+                    operation);
+            blockEntity.setChanged();
+        }
+        return true;
     }
 
     private static int occupied(ServerLevel level, BlockPos pos) {
@@ -491,7 +439,7 @@ public final class SimurailTrainBootstrap {
     }
 
     private static BlockPos assemblerPos(BlockPos anchor) {
-        return anchor.offset(0, 3, 0);
+        return anchor.offset(StarterTrainLayout.assemblerOffset());
     }
 
     private static void place(
@@ -519,6 +467,21 @@ public final class SimurailTrainBootstrap {
                     .orElseThrow(() -> new IllegalArgumentException(
                             id + " has no block-state property named " + propertyName));
             state = applyProperty(state, property, propertyValue);
+        }
+        return state;
+    }
+
+    private static BlockState state(StarterTrainLayout.BlockSpec spec) {
+        BlockState state = BuiltInRegistries.BLOCK
+                .get(ResourceLocation.parse(spec.blockId()))
+                .defaultBlockState();
+        for (java.util.Map.Entry<String, String> entry : spec.properties().entrySet()) {
+            Property<?> property = state.getProperties().stream()
+                    .filter(candidate -> candidate.getName().equals(entry.getKey()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            spec.blockId() + " has no block-state property named " + entry.getKey()));
+            state = applyProperty(state, property, entry.getValue());
         }
         return state;
     }

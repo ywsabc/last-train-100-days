@@ -40,7 +40,13 @@ class CampaignSavedDataMissionFallbackTest {
         assertTrue(data.start());
         data.advanceDays(CampaignSavedData.FINAL_DAY - 1);
         assertEquals(CampaignSavedData.FINAL_DAY, data.day());
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
+        int hub = data.finaleHubRouteSegment();
+        while (data.generatedRouteSegment() < hub) {
+            assertTrue(data.markRouteSegmentGenerated(data.generatedRouteSegment() + 1));
+        }
+        assertTrue(data.markFinaleHubMaterialized(hub));
+        assertTrue(data.advanceRouteTo(hub));
 
         assertNotNull(data.activeMission());
         assertTrue(data.isFinaleMission(data.activeMission()));

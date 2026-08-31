@@ -120,6 +120,17 @@ class CampaignHundredDaySmokeTest {
 
     /** Completes every active mainline mission; at day 100 also the finale. */
     private static void settleActiveMissions(CampaignSavedData data) {
+        if (data.day() >= CampaignSavedData.FINAL_DAY
+                && data.finaleHubRouteSegment() > 0
+                && !data.finaleHubMaterialized()) {
+            while (data.generatedRouteSegment() < data.finaleHubRouteSegment()) {
+                assertTrue(data.markRouteSegmentGenerated(data.generatedRouteSegment() + 1));
+            }
+            assertTrue(data.markFinaleHubMaterialized(data.finaleHubRouteSegment()));
+            if (data.routeSegment() < data.finaleHubRouteSegment()) {
+                assertTrue(data.advanceRouteTo(data.finaleHubRouteSegment()));
+            }
+        }
         for (int guard = 0; guard < 16; guard++) {
             if (data.status() != CampaignStatus.RUNNING) {
                 return;

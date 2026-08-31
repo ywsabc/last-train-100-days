@@ -15,6 +15,7 @@ import dev.ywsabc.lasttrain.route.RouteSegmentPlan;
 import dev.ywsabc.lasttrain.route.RouteSegmentPlanner;
 import dev.ywsabc.lasttrain.route.RouteTemplateConfig;
 import dev.ywsabc.lasttrain.route.SegmentTemplate;
+import dev.ywsabc.lasttrain.server.BootstrapTransactionPolicy;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
 import java.util.ArrayList;
@@ -108,12 +109,18 @@ public final class CampaignSavedData extends SavedData {
             EnumSet.noneOf(CampaignPacingPolicy.KeyMission.class);
     private UUID finaleMissionId;
     private int finaleHubRouteSegment;
+    private FinalePhase finalePhase = FinalePhase.DORMANT;
+    private boolean finaleHubMaterialized;
     private boolean finaleMissionCompleted;
     private boolean finalDayElapsed;
     private boolean starterStationBuilt;
     private long starterStationAnchor;
+    private BootstrapTransactionPolicy.SupplyPhase starterPublicSupplyPhase =
+            BootstrapTransactionPolicy.SupplyPhase.NOT_STARTED;
     private boolean starterTrainPlaced;
     private boolean starterTrainAssembled;
+    private BootstrapTransactionPolicy.AssemblyPhase starterTrainAssemblyPhase =
+            BootstrapTransactionPolicy.AssemblyPhase.NOT_STARTED;
     private UUID starterTrainSublevelId;
     private int starterTrainAssemblyAttempts;
     private int rescueCount;
@@ -155,6 +162,7 @@ public final class CampaignSavedData extends SavedData {
         try {
             int loadedSchema = loadFields(tag, registries, data);
             data.migrateFinaleState(loadedSchema);
+            data.migrateBootstrapState(loadedSchema);
             if (data.status == CampaignStatus.SAFE_MODE && data.safeModeReasons.isEmpty()) {
                 data.safeModeReasons.add(SafeModeReason.UNKNOWN);
                 data.setDirty();
@@ -244,12 +252,37 @@ public final class CampaignSavedData extends SavedData {
         data.finaleHubRouteSegment = tag.contains("finale_hub_route_segment")
                 ? Math.clamp(tag.getInt("finale_hub_route_segment"), 0, MAX_ROUTE_SEGMENT)
                 : 0;
+        data.finalePhase = FinalePhase.fromSerializedName(tag.getString("finale_phase"));
+        data.finaleHubMaterialized = tag.getBoolean("finale_hub_materialized");
         data.finaleMissionCompleted = tag.getBoolean("finale_mission_completed");
         data.finalDayElapsed = tag.getBoolean("final_day_elapsed");
         data.starterStationBuilt = tag.getBoolean("starter_station_built");
         data.starterStationAnchor = tag.getLong("starter_station_anchor");
+        String rawSupplyPhase = tag.getString("starter_public_supply_phase");
+        data.starterPublicSupplyPhase = BootstrapTransactionPolicy.SupplyPhase.parse(
+                rawSupplyPhase);
+        if (tag.contains("starter_public_supply_phase")
+                && !knownEnumValue(
+                        BootstrapTransactionPolicy.SupplyPhase.class,
+                        rawSupplyPhase)) {
+            // 不可信事务状态按“已提交”失败关闭，宁可少发也不能重灌公共箱。
+            data.starterPublicSupplyPhase = BootstrapTransactionPolicy.SupplyPhase.COMMITTED;
+            data.recordCorruptSave("starter_public_supply_phase:unknown_enum");
+        }
         data.starterTrainPlaced = tag.getBoolean("starter_train_placed");
         data.starterTrainAssembled = tag.getBoolean("starter_train_assembled");
+        String rawAssemblyPhase = tag.getString("starter_train_assembly_phase");
+        data.starterTrainAssemblyPhase = BootstrapTransactionPolicy.AssemblyPhase.parse(
+                rawAssemblyPhase);
+        if (tag.contains("starter_train_assembly_phase")
+                && !knownEnumValue(
+                        BootstrapTransactionPolicy.AssemblyPhase.class,
+                        rawAssemblyPhase)) {
+            // 未知装配状态按“请求已发出”失败关闭，禁止自动放置第二列车。
+            data.starterTrainAssemblyPhase =
+                    BootstrapTransactionPolicy.AssemblyPhase.ASSEMBLY_REQUESTED;
+            data.recordCorruptSave("starter_train_assembly_phase:unknown_enum");
+        }
         if (tag.contains("starter_train_sublevel_id")) {
             try {
                 data.starterTrainSublevelId =
@@ -341,12 +374,16 @@ public final class CampaignSavedData extends SavedData {
             tag.putString("finale_mission_id", finaleMissionId.toString());
         }
         tag.putInt("finale_hub_route_segment", finaleHubRouteSegment);
+        tag.putString("finale_phase", finalePhase.serializedName());
+        tag.putBoolean("finale_hub_materialized", finaleHubMaterialized);
         tag.putBoolean("finale_mission_completed", finaleMissionCompleted);
         tag.putBoolean("final_day_elapsed", finalDayElapsed);
         tag.putBoolean("starter_station_built", starterStationBuilt);
         tag.putLong("starter_station_anchor", starterStationAnchor);
+        tag.putString("starter_public_supply_phase", starterPublicSupplyPhase.name());
         tag.putBoolean("starter_train_placed", starterTrainPlaced);
         tag.putBoolean("starter_train_assembled", starterTrainAssembled);
+        tag.putString("starter_train_assembly_phase", starterTrainAssemblyPhase.name());
         if (starterTrainSublevelId != null) {
             tag.putString("starter_train_sublevel_id", starterTrainSublevelId.toString());
         }
@@ -909,7 +946,8 @@ public final class CampaignSavedData extends SavedData {
     private static void validateKnownRootTypes(CompoundTag tag, CampaignSavedData data) {
         validateTypes(tag, data, Tag.TAG_STRING,
                 "campaign_id", "mode", "status", "active_key_mission",
-                "finale_mission_id", "starter_train_sublevel_id", "captain_id");
+                "finale_mission_id", "finale_phase", "starter_public_supply_phase",
+                "starter_train_assembly_phase", "starter_train_sublevel_id", "captain_id");
         validateTypes(tag, data, Tag.TAG_COMPOUND,
                 "active_mission", "proposed_mission", "route_plan_state",
                 "pending_team_vote");
@@ -923,7 +961,8 @@ public final class CampaignSavedData extends SavedData {
                 "active_ticks_into_day", "total_active_ticks", "route_segment",
                 "generated_route_segment", "threat", "mission_sequence",
                 "finale_hub_route_segment", "finale_mission_completed",
-                "final_day_elapsed", "starter_station_built", "starter_station_anchor",
+                "finale_hub_materialized", "final_day_elapsed",
+                "starter_station_built", "starter_station_anchor",
                 "starter_train_placed", "starter_train_assembled",
                 "starter_train_assembly_attempts", "rescue_count", "last_rescue_day",
                 "train_missing_ticks", "train_immobile_ticks",
@@ -972,6 +1011,20 @@ public final class CampaignSavedData extends SavedData {
             }
         }
         return false;
+    }
+
+    private static <E extends Enum<E>> boolean knownEnumValue(
+            Class<E> type,
+            String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            Enum.valueOf(type, value.trim().toUpperCase(java.util.Locale.ROOT));
+            return true;
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
     }
 
     private static void loadSafeModeReasons(CompoundTag tag, CampaignSavedData data) {
@@ -1070,16 +1123,25 @@ public final class CampaignSavedData extends SavedData {
                 day,
                 finalDayElapsed,
                 finaleMissionCompleted,
-                activeMission != null);
+                activeMission != null,
+                activeMission != null
+                        && activeMission.type() == MissionType.ZOMBIE_BLOCKADE
+                        && isFinaleMission(activeMission),
+                finalePhase,
+                finaleHubMaterialized);
         status = migrated.status();
         finalDayElapsed = migrated.finalDayElapsed();
         finaleMissionCompleted = migrated.finaleMissionCompleted();
+        finalePhase = migrated.phase();
+        finaleHubMaterialized = migrated.hubMaterialized();
+        threat = Math.max(threat, FinalePolicy.phaseEffect(finalePhase).minimumThreat());
 
         if (loadedSchema < 6 || day < FINAL_DAY) {
             finaleMissionId = null;
         }
-        if (!FinalePolicy.isFinaleHubInForwardWindow(routeSegment, finaleHubRouteSegment)) {
+        if (day < FinalePolicy.FINALE_HUB_START_DAY) {
             finaleHubRouteSegment = 0;
+            finaleHubMaterialized = false;
         }
         if (finaleMissionCompleted && isFinaleMission(activeMission)) {
             activeMission = null;
@@ -1093,12 +1155,42 @@ public final class CampaignSavedData extends SavedData {
             // but releases the story-only hub reservation and timer gates.
             finalDayElapsed = false;
             finaleHubRouteSegment = 0;
+            finaleHubMaterialized = false;
+            finalePhase = FinalePhase.DORMANT;
             if (isFinaleMission(activeMission)) {
                 activeMission = null;
                 activeKeyMission = null;
             }
         }
         schemaVersion = CURRENT_SCHEMA;
+    }
+
+    /** 旧存档已有公共补给或源列车时按“已提交”迁移，绝不借升级重新发放。 */
+    private void migrateBootstrapState(int loadedSchema) {
+        if (loadedSchema >= CURRENT_SCHEMA) {
+            if (starterStationBuilt
+                    && starterPublicSupplyPhase
+                            == BootstrapTransactionPolicy.SupplyPhase.NOT_STARTED) {
+                starterPublicSupplyPhase = BootstrapTransactionPolicy.SupplyPhase.COMMITTED;
+            }
+            if (starterTrainAssembled) {
+                starterTrainAssemblyPhase = BootstrapTransactionPolicy.AssemblyPhase.COMMITTED;
+            } else if (starterTrainPlaced
+                    && starterTrainAssemblyPhase
+                            == BootstrapTransactionPolicy.AssemblyPhase.NOT_STARTED) {
+                starterTrainAssemblyPhase =
+                        BootstrapTransactionPolicy.AssemblyPhase.LAYOUT_PREPARED;
+            }
+            return;
+        }
+        starterPublicSupplyPhase = starterStationBuilt
+                ? BootstrapTransactionPolicy.SupplyPhase.COMMITTED
+                : BootstrapTransactionPolicy.SupplyPhase.NOT_STARTED;
+        starterTrainAssemblyPhase = starterTrainAssembled
+                ? BootstrapTransactionPolicy.AssemblyPhase.COMMITTED
+                : starterTrainPlaced
+                        ? BootstrapTransactionPolicy.AssemblyPhase.LAYOUT_PREPARED
+                        : BootstrapTransactionPolicy.AssemblyPhase.NOT_STARTED;
     }
 
     private static int maxDay(CampaignMode mode) {
@@ -1302,6 +1394,8 @@ public final class CampaignSavedData extends SavedData {
         status = CampaignStatus.RUNNING;
         finalDayElapsed = false;
         finaleHubRouteSegment = 0;
+        finaleHubMaterialized = false;
+        finalePhase = FinalePhase.DORMANT;
         activeKeyMission = null;
         setDirty();
         return true;
@@ -1360,6 +1454,7 @@ public final class CampaignSavedData extends SavedData {
             TickOutcome started = reconcileFinaleState();
             setDirty();
             return started == TickOutcome.FINALE_MISSION_STARTED
+                            || started == TickOutcome.FINALE_PHASE_ADVANCED
                     ? TickOutcome.DAY_ADVANCED_WITH_FINALE
                     : TickOutcome.DAY_ADVANCED;
         }
@@ -1478,6 +1573,7 @@ public final class CampaignSavedData extends SavedData {
         }
         routeSegment = (int) requestedRoute;
         ensureFinaleHub();
+        reconcileFinaleState();
         if (activeMission == null) {
             tryGenerateRouteMission();
         }
@@ -1629,10 +1725,11 @@ public final class CampaignSavedData extends SavedData {
                     RewardOutboxPolicy.ReceiptState.PENDING));
         }
         if (finale) {
-            finaleMissionCompleted = true;
-            // Command turn-in also runs on the logical server thread. Resolve
-            // an already elapsed finale immediately so completion does not
-            // depend on another player-driven campaign tick.
+            FinalePhase next = FinalePolicy.nextPhaseAfterTurnIn(finalePhase);
+            enterFinalePhase(next);
+            finaleMissionCompleted = next == FinalePhase.COMPLETED;
+            // 提交也发生在逻辑服务端线程；立即创建下一阶段任务或结算双门，
+            // 不依赖额外玩家 tick 才能继续。
             reconcileFinaleState();
         } else {
             threat = Math.max(0, threat - 2);
@@ -2364,9 +2461,40 @@ public final class CampaignSavedData extends SavedData {
         setDirty();
     }
 
+    public void beginStarterPublicSupply() {
+        if (starterPublicSupplyPhase
+                == BootstrapTransactionPolicy.SupplyPhase.NOT_STARTED) {
+            starterPublicSupplyPhase = BootstrapTransactionPolicy.SupplyPhase.PREPARING;
+            setDirty();
+        }
+    }
+
+    public void commitStarterPublicSupply() {
+        if (starterPublicSupplyPhase
+                != BootstrapTransactionPolicy.SupplyPhase.COMMITTED) {
+            starterPublicSupplyPhase = BootstrapTransactionPolicy.SupplyPhase.COMMITTED;
+            setDirty();
+        }
+    }
+
     public void markStarterTrainPlaced() {
         starterTrainPlaced = true;
+        if (starterTrainAssemblyPhase
+                == BootstrapTransactionPolicy.AssemblyPhase.NOT_STARTED) {
+            starterTrainAssemblyPhase =
+                    BootstrapTransactionPolicy.AssemblyPhase.LAYOUT_PREPARED;
+        }
         setDirty();
+    }
+
+    public void markStarterTrainAssemblyRequested() {
+        starterTrainPlaced = true;
+        if (starterTrainAssemblyPhase
+                != BootstrapTransactionPolicy.AssemblyPhase.COMMITTED) {
+            starterTrainAssemblyPhase =
+                    BootstrapTransactionPolicy.AssemblyPhase.ASSEMBLY_REQUESTED;
+            setDirty();
+        }
     }
 
     public int recordStarterTrainAssemblyAttempt() {
@@ -2378,8 +2506,23 @@ public final class CampaignSavedData extends SavedData {
     public void markStarterTrainAssembled(UUID sublevelId) {
         starterTrainPlaced = true;
         starterTrainAssembled = true;
+        starterTrainAssemblyPhase = BootstrapTransactionPolicy.AssemblyPhase.COMMITTED;
         starterTrainSublevelId = sublevelId;
         setDirty();
+    }
+
+    /** 只有已验证生成的预留区段才能提交“枢纽已物化”。 */
+    public boolean markFinaleHubMaterialized(int segment) {
+        if (segment <= 0
+                || segment != finaleHubRouteSegment
+                || generatedRouteSegment < segment
+                || finaleHubMaterialized) {
+            return false;
+        }
+        finaleHubMaterialized = true;
+        setDirty();
+        reconcileFinaleState();
+        return true;
     }
 
     /**
@@ -2581,7 +2724,7 @@ public final class CampaignSavedData extends SavedData {
     }
 
     private TickOutcome reconcileFinaleState() {
-        if (mode == CampaignMode.ENDLESS) {
+        if (mode == CampaignMode.ENDLESS || status != CampaignStatus.RUNNING) {
             return TickOutcome.NONE;
         }
         ensureFinaleHub();
@@ -2599,38 +2742,46 @@ public final class CampaignSavedData extends SavedData {
             activeKeyMission = null;
             setDirty();
         }
-        FinalePolicy.Directive directive = FinalePolicy.nextDirective(
-                mode,
-                status,
-                day,
-                finalDayElapsed,
-                finaleMissionCompleted,
-                activeMission != null);
-        return switch (directive) {
-            case NONE -> TickOutcome.NONE;
-            case CREATE_FINALE_MISSION -> {
-                // Day-100 protection: the finale can never be blocked by an
-                // unanswered optional proposal, and unfinished optional
-                // missions are settled before the finale starts.
-                settleOptionalMissionsAtFinale();
-                activeMission = ActiveMission.create(
-                        ensureFinaleMissionId(),
-                        MissionType.ZOMBIE_BLOCKADE,
-                        FINAL_DAY,
-                        finaleHubRouteSegment,
-                        PopulationScalingPolicy.missionTarget(
-                                MissionType.ZOMBIE_BLOCKADE,
-                                effectivePlayers,
-                                infectionSample().stage()));
-                setDirty();
-                yield TickOutcome.FINALE_MISSION_STARTED;
-            }
-            case COMPLETE_CAMPAIGN -> {
+        if (day >= FINAL_DAY && finalePhase == FinalePhase.ARRIVAL) {
+            // 兼容从 schema 11 或异常中断点直接恢复到“抵达”的存档：可选任务
+            // 结算必须幂等补做，不能依赖本次进程是否亲自执行过阶段开启。
+            settleOptionalMissionsAtFinale();
+        }
+        if (day < FINAL_DAY || activeMission != null) {
+            return TickOutcome.NONE;
+        }
+
+        TickOutcome phaseOutcome = TickOutcome.NONE;
+        if (FinalePolicy.shouldOpenArrival(mode, status, day, finalePhase)) {
+            // 第 100 日先冻结可选内容，再进入“抵达”；此阶段不生成可刷的普通
+            // 任务，只等待真实列车与已经物化的枢纽同时满足门槛。
+            settleOptionalMissionsAtFinale();
+            enterFinalePhase(FinalePhase.ARRIVAL);
+            phaseOutcome = TickOutcome.FINALE_PHASE_ADVANCED;
+        }
+        if (FinalePolicy.arrivalComplete(
+                finalePhase,
+                finaleHubMaterialized,
+                routeSegment,
+                finaleHubRouteSegment)) {
+            enterFinalePhase(FinalePhase.RESTART);
+            phaseOutcome = TickOutcome.FINALE_PHASE_ADVANCED;
+        }
+
+        if (finalePhase == FinalePhase.RESTART
+                || finalePhase == FinalePhase.HOLD_DAWN) {
+            createFinalePhaseMission();
+            return TickOutcome.FINALE_MISSION_STARTED;
+        }
+        if (finalePhase == FinalePhase.COMPLETED) {
+            finaleMissionCompleted = true;
+            if (finalDayElapsed) {
                 status = CampaignStatus.COMPLETED;
                 setDirty();
-                yield TickOutcome.CAMPAIGN_COMPLETED;
+                return TickOutcome.CAMPAIGN_COMPLETED;
             }
-        };
+        }
+        return phaseOutcome;
     }
 
     /** Reserves a new, unexplored hub window whenever the final phase is open. */
@@ -2638,10 +2789,12 @@ public final class CampaignSavedData extends SavedData {
         if (!FinalePolicy.finaleHubWindowOpen(mode, status, day)) {
             return false;
         }
-        if (FinalePolicy.isFinaleHubInForwardWindow(routeSegment, finaleHubRouteSegment)) {
+        if (finaleHubRouteSegment > 0) {
             return false;
         }
-        FinalePolicy.HubWindow window = FinalePolicy.finaleHubWindow(routeSegment);
+        FinalePolicy.HubWindow window = FinalePolicy.finaleHubWindow(
+                routeSegment,
+                generatedRouteSegment);
         int first = window.firstSegment();
         int last = Math.min(MAX_ROUTE_SEGMENT, window.lastSegment());
         if (first > last) {
@@ -2649,8 +2802,11 @@ public final class CampaignSavedData extends SavedData {
         }
         int candidate = Math.min(
                 last,
-                FinalePolicy.chooseFinaleHubSegment(campaignId, routeSegment));
-        if (candidate <= routeSegment) {
+                FinalePolicy.chooseFinaleHubSegment(
+                        campaignId,
+                        routeSegment,
+                        generatedRouteSegment));
+        if (candidate <= Math.max(routeSegment, generatedRouteSegment)) {
             return false;
         }
         finaleHubRouteSegment = candidate;
@@ -2660,9 +2816,44 @@ public final class CampaignSavedData extends SavedData {
 
     private UUID ensureFinaleMissionId() {
         if (finaleMissionId == null) {
-            finaleMissionId = FinalePolicy.missionId(campaignId);
+            finaleMissionId = FinalePolicy.missionId(campaignId, finalePhase);
         }
         return finaleMissionId;
+    }
+
+    private void enterFinalePhase(FinalePhase next) {
+        if (next == null || next == finalePhase) {
+            return;
+        }
+        finalePhase = next;
+        finaleMissionId = null;
+        FinalePolicy.PhaseEffect effect = FinalePolicy.phaseEffect(next);
+        threat = Math.max(threat, effect.minimumThreat());
+        if (next == FinalePhase.COMPLETED) {
+            finaleMissionCompleted = true;
+        }
+        setDirty();
+    }
+
+    private void createFinalePhaseMission() {
+        FinalePolicy.PhaseEffect effect = FinalePolicy.phaseEffect(finalePhase);
+        MissionType type = effect.missionType();
+        if (type == null || activeMission != null) {
+            return;
+        }
+        int target = effect.fixedTarget() > 0
+                ? effect.fixedTarget()
+                : FinalePolicy.dawnTarget(PopulationScalingPolicy.missionTarget(
+                        type,
+                        effectivePlayers,
+                        infectionSample().stage()));
+        activeMission = ActiveMission.create(
+                ensureFinaleMissionId(),
+                type,
+                FINAL_DAY,
+                finaleHubRouteSegment,
+                target);
+        setDirty();
     }
 
     public boolean isFinaleMission(ActiveMission mission) {
@@ -2870,6 +3061,14 @@ public final class CampaignSavedData extends SavedData {
         return finaleHubRouteSegment;
     }
 
+    public FinalePhase finalePhase() {
+        return finalePhase;
+    }
+
+    public boolean finaleHubMaterialized() {
+        return finaleHubMaterialized;
+    }
+
     public boolean finaleMissionCompleted() {
         return finaleMissionCompleted;
     }
@@ -2886,12 +3085,25 @@ public final class CampaignSavedData extends SavedData {
         return BlockPos.of(starterStationAnchor);
     }
 
+    public BootstrapTransactionPolicy.SupplyPhase starterPublicSupplyPhase() {
+        return starterPublicSupplyPhase;
+    }
+
+    public boolean starterPublicSupplyCommitted() {
+        return starterPublicSupplyPhase
+                == BootstrapTransactionPolicy.SupplyPhase.COMMITTED;
+    }
+
     public boolean starterTrainPlaced() {
         return starterTrainPlaced;
     }
 
     public boolean starterTrainAssembled() {
         return starterTrainAssembled;
+    }
+
+    public BootstrapTransactionPolicy.AssemblyPhase starterTrainAssemblyPhase() {
+        return starterTrainAssemblyPhase;
     }
 
     public UUID starterTrainSublevelId() {
@@ -2924,6 +3136,7 @@ public final class CampaignSavedData extends SavedData {
         DAY_ADVANCED_WITH_MISSION,
         DAY_ADVANCED_WITH_FINALE,
         FINALE_MISSION_STARTED,
+        FINALE_PHASE_ADVANCED,
         FINAL_DAY_ELAPSED,
         SIEGE_TRIGGERED,
         CAMPAIGN_COMPLETED

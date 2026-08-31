@@ -280,11 +280,12 @@ class CampaignSavedDataOptionalMissionTest {
 
         data.advanceDays(1);
         assertEquals(CampaignSavedData.FINAL_DAY, data.day());
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
 
         assertNull(data.proposedMission());
         assertTrue(data.optionalMissions().isEmpty());
-        assertTrue(data.isFinaleMission(data.activeMission()));
+        assertNull(data.activeMission());
+        assertEquals(FinalePhase.ARRIVAL, data.finalePhase());
         assertTrue(data.missionHistory().stream().anyMatch(entry ->
                 entry.type() == MissionType.SALVAGE_CAR
                         && entry.outcome() == MissionPoolPolicy.Outcome.SKIPPED));
@@ -299,10 +300,10 @@ class CampaignSavedDataOptionalMissionTest {
         assertTrue(data.proposeOptionalMission(MissionType.SALVAGE_CAR));
         data.advanceDays(1);
 
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
         assertNull(data.proposedMission());
-        assertNotNull(data.activeMission());
-        assertTrue(data.isFinaleMission(data.activeMission()));
+        assertNull(data.activeMission());
+        assertEquals(FinalePhase.ARRIVAL, data.finalePhase());
     }
 
     @Test
@@ -316,7 +317,7 @@ class CampaignSavedDataOptionalMissionTest {
         assertEquals(MissionStage.REWARD_PENDING, data.optionalMission(id).orElseThrow().stage());
 
         data.advanceDays(1);
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
 
         assertEquals(MissionStage.REWARD_PENDING, data.optionalMission(id).orElseThrow().stage());
         assertEquals(

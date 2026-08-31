@@ -126,15 +126,11 @@ class CampaignEndlessModeTest {
         assertFalse(data.isFinaleMission(data.activeMission()));
         data.clearMission();
         assertTrue(data.proposeOptionalMission(MissionType.SALVAGE_CAR));
-        assertEquals(
-                FinalePolicy.Directive.NONE,
-                FinalePolicy.nextDirective(
-                        CampaignMode.ENDLESS,
-                        CampaignStatus.RUNNING,
-                        150,
-                        false,
-                        true,
-                        false));
+        assertFalse(FinalePolicy.shouldOpenArrival(
+                CampaignMode.ENDLESS,
+                CampaignStatus.RUNNING,
+                150,
+                FinalePhase.DORMANT));
     }
 
     @Test
