@@ -128,9 +128,14 @@ public final class CampaignEvents {
             }
             case DAY_ADVANCED_WITH_FINALE -> {
                 broadcast(server, Component.translatable("message.lasttrain.day_advanced", data.day()));
+                broadcastFinalePhase(server, data);
                 broadcastFinale(server, data.activeMission());
             }
-            case FINALE_MISSION_STARTED -> broadcastFinale(server, data.activeMission());
+            case FINALE_MISSION_STARTED -> {
+                broadcastFinalePhase(server, data);
+                broadcastFinale(server, data.activeMission());
+            }
+            case FINALE_PHASE_ADVANCED -> broadcastFinalePhase(server, data);
             case SIEGE_TRIGGERED -> broadcastSiege(server, data.activeMission());
             case FINAL_DAY_ELAPSED ->
                     broadcast(server, Component.translatable("message.lasttrain.final_day_elapsed"));
@@ -157,6 +162,7 @@ public final class CampaignEvents {
                 && CampaignStartPolicy.shouldAutoStart(
                         activePlayers > 0,
                         data.starterStationBuilt(),
+                        data.starterPublicSupplyCommitted(),
                         data.starterTrainAssembled(),
                         trainId != null,
                         trainLocated)
@@ -300,10 +306,21 @@ public final class CampaignEvents {
         if (mission == null) {
             return;
         }
+        String key = mission.type() == dev.ywsabc.lasttrain.mission.MissionType.STATION_POWER
+                ? "message.lasttrain.finale_restart"
+                : "message.lasttrain.finale_started";
+        broadcast(server, Component.translatable(key, mission.target(), mission.routeSegment()));
+    }
+
+    private static void broadcastFinalePhase(
+            MinecraftServer server,
+            CampaignSavedData data) {
         broadcast(server, Component.translatable(
-                "message.lasttrain.finale_started",
-                mission.target(),
-                mission.routeSegment()));
+                "message.lasttrain.finale_phase",
+                Component.translatable(
+                        "finale.lasttrain.phase." + data.finalePhase().serializedName()),
+                data.finaleHubRouteSegment(),
+                data.threat()));
     }
 
     private static void broadcastSiege(MinecraftServer server, ActiveMission mission) {

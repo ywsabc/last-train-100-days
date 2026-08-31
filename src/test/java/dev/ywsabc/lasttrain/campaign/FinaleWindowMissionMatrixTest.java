@@ -93,9 +93,10 @@ class FinaleWindowMissionMatrixTest {
 
         data.advanceDays(1);
         assertEquals(CampaignSavedData.FINAL_DAY, data.day());
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
 
-        assertTrue(data.isFinaleMission(data.activeMission()));
+        assertTrue(data.activeMission() == null);
+        assertEquals(FinalePhase.ARRIVAL, data.finalePhase());
         assertEquals(
                 1,
                 data.pendingSiteCleanups().stream()
@@ -115,8 +116,9 @@ class FinaleWindowMissionMatrixTest {
         CampaignSavedData data = atDay(99);
         assertTrue(data.createMission(MissionType.SUPPLY_RECOVERY));
         data.advanceDays(1);
-        assertEquals(CampaignSavedData.TickOutcome.FINALE_MISSION_STARTED, data.tick());
-        assertTrue(data.isFinaleMission(data.activeMission()));
+        assertEquals(CampaignSavedData.TickOutcome.FINALE_PHASE_ADVANCED, data.tick());
+        assertTrue(data.activeMission() == null);
+        assertEquals(FinalePhase.ARRIVAL, data.finalePhase());
         assertTrue(data.pendingSiteCleanups().isEmpty());
     }
 

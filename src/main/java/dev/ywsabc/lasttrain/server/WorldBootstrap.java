@@ -22,6 +22,9 @@ import net.minecraft.world.level.levelgen.Heightmap;
  */
 public final class WorldBootstrap {
     private static final int UPDATE_ALL = 3;
+    private static final String PUBLIC_SUPPLY_OPERATION_KEY =
+            "lasttrain_public_supply_operation";
+    private static final String PUBLIC_SUPPLY_VERSION = "starter_station_v1";
 
     private WorldBootstrap() {
     }
@@ -29,28 +32,28 @@ public final class WorldBootstrap {
     public static void ensureStarterStation(ServerLevel level, CampaignSavedData data) {
         if (data.starterStationBuilt()) {
             migrateLegacyCanopyClearance(level, data.starterStationAnchor());
-            return;
+        } else {
+            BlockPos worldSpawn = level.getSharedSpawnPos();
+            int centerX = worldSpawn.getX();
+            int centerZ = worldSpawn.getZ();
+            int deckY = level.getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    centerX,
+                    centerZ);
+            BlockPos anchor = new BlockPos(centerX, deckY, centerZ);
+
+            clearHeadroom(level, anchor);
+            buildDeck(level, anchor);
+            buildCanopy(level, anchor);
+            placeUtilities(level, anchor);
+
+            BlockPos safeSpawn = anchor.offset(-7, 1, 3);
+            level.setDefaultSpawnPos(safeSpawn, 0.0F);
+            data.markStarterStationBuilt(anchor);
+            LastTrain.LOGGER.info("Starter station bootstrapped at {}", anchor);
         }
 
-        BlockPos worldSpawn = level.getSharedSpawnPos();
-        int centerX = worldSpawn.getX();
-        int centerZ = worldSpawn.getZ();
-        int deckY = level.getHeight(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                centerX,
-                centerZ);
-        BlockPos anchor = new BlockPos(centerX, deckY, centerZ);
-
-        clearHeadroom(level, anchor);
-        buildDeck(level, anchor);
-        buildCanopy(level, anchor);
-        placeUtilities(level, anchor);
-        fillSupplyChest(level, anchor.offset(-7, 1, 2));
-
-        BlockPos safeSpawn = anchor.offset(-7, 1, 3);
-        level.setDefaultSpawnPos(safeSpawn, 0.0F);
-        data.markStarterStationBuilt(anchor);
-        LastTrain.LOGGER.info("Starter station bootstrapped at {}", anchor);
+        ensurePublicSupply(level, data);
     }
 
     private static void clearHeadroom(ServerLevel level, BlockPos anchor) {
@@ -167,13 +170,48 @@ public final class WorldBootstrap {
         level.setBlock(anchor.offset(-1, 1, 2), Blocks.RED_WOOL.defaultBlockState(), UPDATE_ALL);
     }
 
-    private static void fillSupplyChest(ServerLevel level, BlockPos chestPos) {
+    /**
+     * 公共补给事务：先持久化意图，再写箱体内容与操作标记，最后提交 SavedData。
+     * 若崩溃发生在两份存储之间，重启只补缺少的半边，不会再次灌入已领取物资。
+     */
+    private static void ensurePublicSupply(ServerLevel level, CampaignSavedData data) {
+        if (data.starterPublicSupplyCommitted()) {
+            return;
+        }
+        data.beginStarterPublicSupply();
+        BlockPos chestPos = data.starterStationAnchor().offset(-7, 1, 2);
+        if (!level.getBlockState(chestPos).is(Blocks.CHEST)) {
+            level.setBlock(chestPos, Blocks.CHEST.defaultBlockState(), UPDATE_ALL);
+        }
         BlockEntity blockEntity = level.getBlockEntity(chestPos);
         if (!(blockEntity instanceof Container chest)) {
             LastTrain.LOGGER.warn("Starter supply chest was not available at {}", chestPos);
             return;
         }
+        String operation = publicSupplyOperation(data);
+        boolean markerMatches = operation.equals(
+                blockEntity.getPersistentData().getString(PUBLIC_SUPPLY_OPERATION_KEY));
+        BootstrapTransactionPolicy.SupplyDirective directive =
+                BootstrapTransactionPolicy.supplyDirective(
+                        data.starterPublicSupplyPhase(),
+                        markerMatches);
+        if (directive == BootstrapTransactionPolicy.SupplyDirective.WRITE_AND_COMMIT) {
+            fillSupplyChest(chest, blockEntity, operation);
+        }
+        if (directive != BootstrapTransactionPolicy.SupplyDirective.NONE) {
+            data.commitStarterPublicSupply();
+        }
+    }
 
+    static String publicSupplyOperation(CampaignSavedData data) {
+        return data.campaignId() + ":" + PUBLIC_SUPPLY_VERSION;
+    }
+
+    private static void fillSupplyChest(
+            Container chest,
+            BlockEntity blockEntity,
+            String operation) {
+        chest.clearContent();
         put(chest, 0, Items.BREAD, 32);
         put(chest, 1, Items.BAKED_POTATO, 32);
         put(chest, 2, Items.COAL, 32);
@@ -190,6 +228,7 @@ public final class WorldBootstrap {
         put(chest, 13, Items.WATER_BUCKET, 2);
         put(chest, 14, Items.GOLDEN_APPLE, 2);
         putOptional(chest, 15, "create:track", 48);
+        blockEntity.getPersistentData().putString(PUBLIC_SUPPLY_OPERATION_KEY, operation);
         blockEntity.setChanged();
     }
 

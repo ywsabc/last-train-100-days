@@ -18,6 +18,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.neoforged.fml.ModList;
 
 /**
@@ -49,6 +50,8 @@ public final class RouteDirector {
     private static final int SEGMENTS_AHEAD = 2;
     private static final int VEHICLE_CLEARANCE_RADIUS = 3;
     private static final int VEHICLE_CLEARANCE_HEIGHT = 6;
+    private static final String FINALE_HUB_OPERATION_KEY =
+            "lasttrain_finale_hub_operation";
     /**
      * Per-tick submission attempts for one branch track run. The bound keeps
      * a failing branch from spinning the director into an infinite loop: the
@@ -84,6 +87,8 @@ public final class RouteDirector {
             }
             return;
         }
+
+        ensureFinaleHubMaterialized(level, data);
 
         int occupiedSegment = occupiedSegment(level, data);
         if (occupiedSegment > data.routeSegment()) {
@@ -652,6 +657,100 @@ public final class RouteDirector {
                         UPDATE_ALL);
             }
         }
+    }
+
+    /**
+     * 在预留且已验证生成的区段上叠加专用避难枢纽。所有落块都是确定性的，提交
+     * 标记只在完整结构写完后设置；中途崩溃会重做同一位置，不会另选或复制枢纽。
+     */
+    private static void ensureFinaleHubMaterialized(
+            ServerLevel level,
+            CampaignSavedData data) {
+        int segment = data.finaleHubRouteSegment();
+        if (segment <= 0
+                || data.generatedRouteSegment() < segment) {
+            return;
+        }
+        FinaleHubLayout hub = FinaleHubLayout.compute(
+                data.starterStationAnchor(),
+                segment);
+        if (!level.hasChunkAt(hub.platformCenter())) {
+            return;
+        }
+        String operation = data.campaignId() + ":finale_hub:" + segment;
+        if (finaleHubCriticalControlsComplete(level, hub, operation)) {
+            if (!data.finaleHubMaterialized()) {
+                data.markFinaleHubMaterialized(segment);
+            }
+            return;
+        }
+        for (BlockPos floor : hub.platformFloor()) {
+            level.setBlock(floor, Blocks.STONE_BRICKS.defaultBlockState(), UPDATE_ALL);
+        }
+        for (BlockPos post : hub.perimeterPosts()) {
+            for (int y = 0; y < 4; y++) {
+                level.setBlock(
+                        post.above(y),
+                        Blocks.REINFORCED_DEEPSLATE.defaultBlockState(),
+                        UPDATE_ALL);
+            }
+            level.setBlock(post.above(4), Blocks.LANTERN.defaultBlockState(), UPDATE_ALL);
+        }
+        for (int y = 0; y < 6; y++) {
+            level.setBlock(
+                    hub.radioMast().above(y),
+                    Blocks.IRON_BARS.defaultBlockState(),
+                    UPDATE_ALL);
+        }
+        level.setBlock(
+                hub.radioMast().above(6),
+                Blocks.LIGHTNING_ROD.defaultBlockState(),
+                UPDATE_ALL);
+        level.setBlock(
+                hub.powerControl(),
+                Blocks.REDSTONE_LAMP.defaultBlockState(),
+                UPDATE_ALL);
+        level.setBlock(
+                hub.defenseControl(),
+                Blocks.DISPENSER.defaultBlockState(),
+                UPDATE_ALL);
+        BlockEntity defense = level.getBlockEntity(hub.defenseControl());
+        if (defense == null) {
+            return;
+        }
+        defense.getPersistentData().putString(FINALE_HUB_OPERATION_KEY, operation);
+        defense.setChanged();
+        if (data.markFinaleHubMaterialized(segment)) {
+            LastTrain.LOGGER.info(
+                    "Final refuge hub materialized at route segment {} around {}",
+                    segment,
+                    hub.platformCenter());
+        } else {
+            LastTrain.LOGGER.info(
+                    "Final refuge hub critical controls repaired at route segment {}",
+                    segment);
+        }
+    }
+
+    private static boolean finaleHubCriticalControlsComplete(
+            ServerLevel level,
+            FinaleHubLayout hub,
+            String operation) {
+        if (!level.getBlockState(hub.radioMast().above(6)).is(Blocks.LIGHTNING_ROD)
+                || !level.getBlockState(hub.powerControl()).is(Blocks.REDSTONE_LAMP)
+                || !level.getBlockState(hub.defenseControl()).is(Blocks.DISPENSER)) {
+            return false;
+        }
+        for (BlockPos post : hub.perimeterPosts()) {
+            if (!level.getBlockState(post).is(Blocks.REINFORCED_DEEPSLATE)
+                    || !level.getBlockState(post.above(4)).is(Blocks.LANTERN)) {
+                return false;
+            }
+        }
+        BlockEntity defense = level.getBlockEntity(hub.defenseControl());
+        return defense != null
+                && operation.equals(defense.getPersistentData()
+                        .getString(FINALE_HUB_OPERATION_KEY));
     }
 
     private static Block registeredBlock(String id) {

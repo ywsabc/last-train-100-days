@@ -8,11 +8,13 @@ public final class CampaignStartPolicy {
     public static boolean shouldAutoStart(
             boolean hasActivePlayer,
             boolean starterStationBuilt,
+            boolean starterPublicSupplyCommitted,
             boolean starterTrainAssembled,
             boolean starterTrainIdPresent,
             boolean starterTrainLocated) {
         return hasActivePlayer
                 && starterStationBuilt
+                && starterPublicSupplyCommitted
                 && starterTrainAssembled
                 && starterTrainIdPresent
                 && starterTrainLocated;

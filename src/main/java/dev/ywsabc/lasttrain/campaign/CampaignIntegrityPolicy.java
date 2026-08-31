@@ -74,11 +74,15 @@ public final class CampaignIntegrityPolicy {
         if (data.status() == CampaignStatus.COMPLETED
                 && (!data.finalDayElapsed()
                         || !data.finaleMissionCompleted()
+                        || data.finalePhase() != FinalePhase.COMPLETED
                         || active != null)) {
             issues.add(error(Code.INVALID_COMPLETED_FINALE, data.status().name()));
         }
         if (data.mode() == CampaignMode.ENDLESS
-                && (data.finalDayElapsed() || data.finaleHubRouteSegment() != 0)) {
+                && (data.finalDayElapsed()
+                        || data.finaleHubRouteSegment() != 0
+                        || data.finaleHubMaterialized()
+                        || data.finalePhase() != FinalePhase.DORMANT)) {
             issues.add(error(Code.STORY_STATE_IN_ENDLESS, String.valueOf(data.finaleHubRouteSegment())));
         }
         if (data.routeSegment() > data.generatedRouteSegment()) {
