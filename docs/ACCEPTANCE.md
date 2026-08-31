@@ -20,7 +20,7 @@
 | 无人在线暂停 | 事件层在 0 名非旁观者时暂停路线、主任务、可选任务、outbox 与清理世界副作用；`ServerActivityPolicyTest` | PASS（控制流/纯策略） |
 | 状态与存档诊断 | `/lasttrain status detail` 输出同 tick 不可变快照；`/lasttrain validate save` 和加载日志使用同一只读完整性策略 | PASS（纯策略/编译） |
 | 列车恢复 | 丢失/静止判定、代价、冷却、锚点钳制和 `SAFE_MODE` 已实现；`recover train` 仍只登记逻辑救援 | PARTIAL：物理归位/重建仍待后端与实机验收 |
-| 存档兼容 | 沿用 schema 11，新增任务使用现有枚举序列化和已有奖励收据结构，没有字段或 schema 迁移 | PASS（保存重载回归） |
+| 存档兼容 | schema 12 为任务/延期清理快照增加有界实体 UUID 索引；旧档在现场 96 格 AABB 内执行一次兼容认领 | PASS（保存重载回归） |
 
 当前全量 JUnit 回归为 `385 passed / 0 failed / 0 errors / 0 skipped`；执行命令为
 `./gradlew cleanTest test --rerun-tasks --no-build-cache -q`。本轮遵守不启动游戏、

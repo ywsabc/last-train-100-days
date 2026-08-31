@@ -5,8 +5,9 @@ import java.util.UUID;
 /** Pure policy for activating and reconciling a zombie-blockade mission. */
 final class ZombieBlockadePolicy {
     static final double ACTIVATION_DISTANCE = 96.0D;
-    static final double RECONCILIATION_RADIUS = 48.0D;
-    static final int MAX_MANAGED_ZOMBIES = 48;
+    /** 活动任务实体越过该半径后按原 UUID 传送回收，不创建替代实体。 */
+    static final double MANAGEMENT_RADIUS = 96.0D;
+    static final int MAX_MANAGED_ZOMBIES = MissionEntityContainer.MAX_REGISTERED_ENTITIES;
     static final int MAX_SPAWNS_PER_TICK = 4;
     /** 每轮最多淘汰 64 个旧实体，兼顾收敛速度与单 tick 预算。 */
     static final int MAX_DISCARDS_PER_TICK = 64;

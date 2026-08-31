@@ -7,6 +7,9 @@ import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 
 /**
  * One persisted mission instance.
@@ -30,11 +33,15 @@ public final class ActiveMission {
     private final long createdTick;
     private final long deadlineTick;
     private final Set<Integer> repairedIndices = new LinkedHashSet<>();
+    /** UUID 白名单随任务快照持久化，实体离开现场或卸载区块后仍占用名额。 */
+    private final Set<UUID> entityIds = new LinkedHashSet<>();
     private MissionStage stage;
     private int revision;
     private int progress;
     private BlockPos site;
     private boolean worldPrepared;
+    /** 旧存档兼容认领只运行一次；正常路径之后完全按 UUID 索引工作。 */
+    private boolean entityIndexInitialized;
 
     private ActiveMission(
             UUID id,
@@ -61,6 +68,7 @@ public final class ActiveMission {
         // 没有稳定现场坐标就不能声称世界准备完成；旧档异常组合会在下一 tick
         // 重新分配现场并走幂等准备，而不是直接观察空气后误判完成。
         this.worldPrepared = worldPrepared && this.site != null;
+        this.entityIndexInitialized = false;
         this.createdTick = Math.max(0L, createdTick);
         this.deadlineTick = Math.max(this.createdTick, deadlineTick);
         normalizeStage();
@@ -212,6 +220,19 @@ public final class ActiveMission {
         for (int index : tag.getIntArray("repair_indices")) {
             mission.recordRepairIndex(index);
         }
+        mission.entityIndexInitialized = tag.getBoolean("entity_index_initialized");
+        ListTag entityIds = tag.getList("entity_ids", Tag.TAG_STRING);
+        for (int index = 0;
+                index < entityIds.size()
+                        && mission.entityIds.size()
+                                < MissionEntityContainer.MAX_REGISTERED_ENTITIES;
+                index++) {
+            try {
+                mission.entityIds.add(UUID.fromString(entityIds.getString(index)));
+            } catch (IllegalArgumentException ignored) {
+                // 损坏 UUID 只丢弃本项，不能让整个任务快照无法加载。
+            }
+        }
         mission.normalizeStage();
         return mission;
     }
@@ -230,11 +251,19 @@ public final class ActiveMission {
             tag.putLong("site", site.asLong());
         }
         tag.putBoolean("world_prepared", worldPrepared);
+        tag.putBoolean("entity_index_initialized", entityIndexInitialized);
         tag.putLong("created_tick", createdTick);
         tag.putLong("deadline_tick", deadlineTick);
         tag.putIntArray(
                 "repair_indices",
                 repairedIndices.stream().sorted().mapToInt(Integer::intValue).toArray());
+        ListTag entities = new ListTag();
+        entityIds.stream()
+                .sorted()
+                .map(UUID::toString)
+                .map(StringTag::valueOf)
+                .forEach(entities::add);
+        tag.put("entity_ids", entities);
         return tag;
     }
 
@@ -278,6 +307,34 @@ public final class ActiveMission {
 
     public Set<Integer> repairedIndices() {
         return Set.copyOf(repairedIndices);
+    }
+
+    /** 由 CampaignSavedData 在检查全局硬上限后调用。 */
+    public boolean registerEntity(UUID entityId) {
+        Objects.requireNonNull(entityId, "entityId");
+        if (entityIds.contains(entityId)) {
+            return false;
+        }
+        if (entityIds.size() >= MissionEntityContainer.MAX_REGISTERED_ENTITIES) {
+            return false;
+        }
+        return entityIds.add(entityId);
+    }
+
+    public boolean unregisterEntity(UUID entityId) {
+        return entityId != null && entityIds.remove(entityId);
+    }
+
+    public Set<UUID> entityIds() {
+        return Set.copyOf(entityIds);
+    }
+
+    public boolean markEntityIndexInitialized() {
+        if (entityIndexInitialized) {
+            return false;
+        }
+        entityIndexInitialized = true;
+        return true;
     }
 
     public boolean addProgress(int amount) {
@@ -378,6 +435,10 @@ public final class ActiveMission {
 
     public boolean worldPrepared() {
         return worldPrepared;
+    }
+
+    public boolean entityIndexInitialized() {
+        return entityIndexInitialized;
     }
 
     public long createdTick() {

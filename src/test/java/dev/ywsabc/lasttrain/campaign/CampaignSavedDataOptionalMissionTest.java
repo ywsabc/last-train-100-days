@@ -220,7 +220,7 @@ class CampaignSavedDataOptionalMissionTest {
     }
 
     @Test
-    void completedRewardOperationsPersistInsideSchemaEleven() {
+    void completedRewardOperationsPersistInsideCurrentSchema() {
         CampaignSavedData data = started();
         assertTrue(data.proposeOptionalMission(MissionType.RESCUE_SURVIVOR));
         UUID id = data.proposedMission().id();
@@ -233,7 +233,7 @@ class CampaignSavedDataOptionalMissionTest {
         CompoundTag saved = data.save(new CompoundTag(), null);
         CampaignSavedData loaded = CampaignSavedData.load(saved, null);
 
-        assertEquals(11, saved.getInt("schema_version"));
+        assertEquals(CampaignSavedData.CURRENT_SCHEMA, saved.getInt("schema_version"));
         assertEquals(1, saved.getList("completed_reward_operations", 8).size());
         assertTrue(loaded.hasCompletedRewardOperation(operationId));
         assertEquals(java.util.Set.of(operationId), loaded.completedRewardOperationIds());

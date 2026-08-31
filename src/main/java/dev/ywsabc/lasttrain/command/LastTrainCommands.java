@@ -193,7 +193,9 @@ public final class LastTrainCommands {
                 diagnostics.onlinePlayers(),
                 diagnostics.attention(),
                 Component.translatable(TranslationKeys.attention(diagnostics.attentionLevel())),
-                diagnostics.pursuitDistance());
+                diagnostics.pursuitDistance(),
+                diagnostics.missionEntities(),
+                diagnostics.missionEntityCapacity());
     }
 
     /** 多行统计视图保持只读；先采样一次，避免输出跨 tick 的混合状态。 */
@@ -227,7 +229,9 @@ public final class LastTrainCommands {
                         diagnostics.proposalPending() ? 1 : 0,
                         diagnostics.pendingRewards(),
                         diagnostics.claimedRewards(),
-                        diagnostics.pendingCleanups()),
+                        diagnostics.pendingCleanups(),
+                        diagnostics.missionEntities(),
+                        diagnostics.missionEntityCapacity()),
                 false);
         diagnostics.activeMission().ifPresent(mission -> context.getSource().sendSuccess(
                 () -> Component.translatable(

@@ -21,6 +21,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.level.entity.EntityTypeTest;
@@ -29,6 +30,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -299,9 +301,22 @@ public final class OptionalMissionDirector {
 
     private static void observeRescue(ServerLevel level, CampaignSavedData data, ActiveMission mission) {
         String tag = MissionWorldDirector.survivorEntityTag(mission);
-        Villager survivor = findSurvivor(level, tag);
+        MissionEntityContainer<Entity> entities = MissionWorldDirector.entityContainer(level, data);
+        claimLegacySurvivor(level, data, mission, tag, entities);
+        Villager survivor = findRegisteredEntity(
+                        entities,
+                        mission.id(),
+                        entity -> entity instanceof Villager villager
+                                && !villager.isRemoved()
+                                && villager.getTags().contains(tag))
+                .map(Villager.class::cast)
+                .orElse(null);
         if (survivor == null) {
-            spawnSurvivor(level, mission, tag);
+            // UUID 已登记但实体所在区块未加载时仍占用任务名额，不能扫描全维度，
+            // 也不能生成替代村民。
+            if (entities.count(mission.id()) == 0) {
+                spawnSurvivor(level, mission, tag, entities);
+            }
             return;
         }
         ServerPlayer nearest = nearestFollowingPlayer(level, survivor);
@@ -312,7 +327,7 @@ public final class OptionalMissionDirector {
         Vec3 safePoint = safePoint(level, data);
         if (safePoint != null && survivor.position().distanceToSqr(safePoint) <= SAFE_RADIUS_SQUARED) {
             if (data.recordSurvivorRescued(mission.id())) {
-                survivor.discard();
+                entities.recycle(mission.id(), survivor.getUUID());
                 level.getServer().getPlayerList().broadcastSystemMessage(
                         Component.translatable("message.lasttrain.survivor_found"),
                         false);
@@ -320,25 +335,29 @@ public final class OptionalMissionDirector {
         }
     }
 
-    private static Villager findSurvivor(ServerLevel level, String tag) {
-        List<Villager> matches = findSurvivors(level, tag, 1);
-        return matches.isEmpty() ? null : matches.get(0);
+    /** UUID 白名单直接定位；接口没有扫描入口，Fake 可精确断言调用次数。 */
+    static <E> Optional<E> findRegisteredEntity(
+            MissionEntityContainer<E> entities,
+            java.util.UUID missionId,
+            java.util.function.Predicate<E> matches) {
+        for (java.util.UUID entityId : entities.registeredIds(missionId)) {
+            Optional<E> found = entities.find(missionId, entityId);
+            if (found.isPresent() && matches.test(found.orElseThrow())) {
+                return found;
+            }
+            if (found.isPresent()) {
+                // UUID 能直接解析却已不是本任务目标时，回收损坏/串线实体并释放名额。
+                entities.recycle(missionId, entityId);
+            }
+        }
+        return Optional.empty();
     }
 
-    private static List<Villager> findSurvivors(
+    private static boolean spawnSurvivor(
             ServerLevel level,
+            ActiveMission mission,
             String tag,
-            int limit) {
-        List<Villager> matches = new ArrayList<>();
-        level.getEntities(
-                EntityTypeTest.forClass(Villager.class),
-                villager -> !villager.isRemoved() && villager.getTags().contains(tag),
-                matches,
-                limit);
-        return matches;
-    }
-
-    private static boolean spawnSurvivor(ServerLevel level, ActiveMission mission, String tag) {
+            MissionEntityContainer<Entity> entities) {
         Villager survivor = EntityType.VILLAGER.create(level);
         if (survivor == null) {
             return false;
@@ -353,7 +372,44 @@ public final class OptionalMissionDirector {
         survivor.setPersistenceRequired();
         survivor.addTag(tag);
         survivor.setCustomName(Component.translatable("mission.lasttrain.rescue_survivor"));
-        return level.addFreshEntity(survivor);
+        if (!entities.register(mission.id(), survivor)) {
+            return false;
+        }
+        if (!level.addFreshEntity(survivor)) {
+            entities.unregister(mission.id(), survivor.getUUID());
+            return false;
+        }
+        return true;
+    }
+
+    /** 旧存档兼容路径仅扫描任务现场 96 格 AABB 一次。 */
+    private static void claimLegacySurvivor(
+            ServerLevel level,
+            CampaignSavedData data,
+            ActiveMission mission,
+            String tag,
+            MissionEntityContainer<Entity> entities) {
+        if (mission.entityIndexInitialized()) {
+            return;
+        }
+        List<Villager> nearby = new ArrayList<>();
+        AABB bounds = AABB.ofSize(
+                Vec3.atCenterOf(mission.site()),
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D);
+        level.getEntities(
+                EntityTypeTest.forClass(Villager.class),
+                bounds,
+                villager -> !villager.isRemoved() && villager.getTags().contains(tag),
+                nearby,
+                MissionEntityContainer.MAX_REGISTERED_ENTITIES);
+        for (Villager villager : nearby) {
+            if (!entities.register(mission.id(), villager)) {
+                villager.discard();
+            }
+        }
+        data.markMissionEntityIndexInitialized(mission.id());
     }
 
     private static ServerPlayer nearestFollowingPlayer(ServerLevel level, Villager survivor) {
@@ -699,12 +755,24 @@ public final class OptionalMissionDirector {
     // ------------------------------------------------------------------
 
     private static void processPendingCleanups(ServerLevel level, CampaignSavedData data) {
+        MissionEntityContainer<Entity> entities = MissionWorldDirector.entityContainer(level, data);
         for (CampaignSavedData.PendingSiteCleanup cleanup : data.pendingSiteCleanups()) {
             BlockPos site = cleanup.site();
+            int indexedBeforeRecycle = entities.count(cleanup.missionId());
+            // 先按 UUID 跨半径回收；现场区块未加载不妨碍清除已加载的离场实体。
+            boolean entitiesCleared = MissionWorldDirector.recycleMissionEntities(
+                    entities,
+                    cleanup.missionId());
+            if (!entitiesCleared) {
+                continue;
+            }
             if (site == null || !level.hasChunkAt(site)) {
                 continue;
             }
-            if (clearOptionalSite(level, cleanup)) {
+            int remainingDiscardBudget = Math.max(
+                    0,
+                    ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK - indexedBeforeRecycle);
+            if (clearOptionalSite(level, cleanup, remainingDiscardBudget)) {
                 data.completePendingCleanup(cleanup.missionId());
             } else {
                 data.recordIntegrityEvent(
@@ -718,7 +786,8 @@ public final class OptionalMissionDirector {
     /** Idempotent: only mission-owned blocks and entities are removed. */
     private static boolean clearOptionalSite(
             ServerLevel level,
-            CampaignSavedData.PendingSiteCleanup cleanup) {
+            CampaignSavedData.PendingSiteCleanup cleanup,
+            int discardBudget) {
         BlockPos site = cleanup.site();
         switch (cleanup.type()) {
             case SALVAGE_CAR -> {
@@ -739,12 +808,13 @@ public final class OptionalMissionDirector {
             }
             case RESCUE_SURVIVOR -> {
                 String tag = MissionWorldDirector.survivorEntityTag(cleanup.missionId());
-                List<Villager> survivors = findSurvivors(
+                List<Villager> survivors = findLegacySurvivors(
                         level,
+                        site,
                         tag,
-                        ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK);
+                        discardBudget);
                 survivors.forEach(Villager::discard);
-                if (survivors.size() >= ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK) {
+                if (discardBudget == 0 || survivors.size() >= discardBudget) {
                     return false;
                 }
             }
@@ -752,5 +822,26 @@ public final class OptionalMissionDirector {
             }
         }
         return true;
+    }
+
+    /** 仅供旧存档清理兜底；正常救援定位始终只查询任务 UUID 索引。 */
+    private static List<Villager> findLegacySurvivors(
+            ServerLevel level,
+            BlockPos site,
+            String tag,
+            int limit) {
+        List<Villager> matches = new ArrayList<>();
+        AABB bounds = AABB.ofSize(
+                Vec3.atCenterOf(site),
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D);
+        level.getEntities(
+                EntityTypeTest.forClass(Villager.class),
+                bounds,
+                villager -> !villager.isRemoved() && villager.getTags().contains(tag),
+                matches,
+                limit);
+        return matches;
     }
 }

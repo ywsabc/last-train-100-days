@@ -1,6 +1,7 @@
 package dev.ywsabc.lasttrain.campaign;
 
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionEntityContainer;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
 import dev.ywsabc.lasttrain.mission.RewardOutboxPolicy;
@@ -39,6 +40,8 @@ public record CampaignDiagnostics(
         int pendingRewards,
         int claimedRewards,
         int pendingCleanups,
+        int missionEntities,
+        int missionEntityCapacity,
         int teamMembers,
         boolean captainAssigned,
         boolean starterTrainAssembled,
@@ -92,6 +95,8 @@ public record CampaignDiagnostics(
                 pendingRewards,
                 receiptCount - pendingRewards,
                 data.pendingSiteCleanups().size(),
+                data.missionEntityCount(),
+                MissionEntityContainer.MAX_REGISTERED_ENTITIES,
                 data.teamMembers().size(),
                 data.captainId() != null,
                 data.starterTrainAssembled(),

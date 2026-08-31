@@ -2,6 +2,7 @@ package dev.ywsabc.lasttrain.campaign;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.MissionEntityContainer;
 import dev.ywsabc.lasttrain.mission.MissionPoolPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
@@ -348,6 +349,7 @@ public final class CampaignSavedData extends SavedData {
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         loadUuidSet(tag, "first_joined", data.firstJoinedPlayers);
         loadOptionalState(tag, registries, data);
+        data.enforceMissionEntityHardLimitOnLoad();
         loadRoutePlanState(tag, data);
         return loadedSchema;
     }
@@ -1720,6 +1722,168 @@ public final class CampaignSavedData extends SavedData {
         return true;
     }
 
+    /** 标记旧实体标签已经在受限现场范围内完成一次兼容认领。 */
+    public boolean markMissionEntityIndexInitialized(UUID missionId) {
+        ActiveMission mission = missionForEntityIndex(missionId);
+        if (mission == null || !mission.markEntityIndexInitialized()) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    /**
+     * 把实体 UUID 登记到任务快照。这里集中执行跨主线、可选任务和待清理记录的
+     * 全局 48 个硬上限，世界导演不能用“当前加载/当前半径内”数量绕过它。
+     */
+    public boolean registerMissionEntity(UUID missionId, UUID entityId) {
+        if (missionId == null || entityId == null) {
+            return false;
+        }
+        Set<UUID> owned = missionEntityIds(missionId);
+        if (owned.contains(entityId)) {
+            return true;
+        }
+        if (missionEntityIds().contains(entityId)
+                || missionEntityCount() >= MissionEntityContainer.MAX_REGISTERED_ENTITIES) {
+            return false;
+        }
+        ActiveMission mission = missionForEntityIndex(missionId);
+        if (mission == null || !mission.registerEntity(entityId)) {
+            return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    /** 从指定任务（含待清理快照）移除一个已死亡或已回收实体。 */
+    public boolean unregisterMissionEntity(UUID missionId, UUID entityId) {
+        if (missionId == null || entityId == null) {
+            return false;
+        }
+        boolean changed = false;
+        ActiveMission mission = missionForEntityIndex(missionId);
+        if (mission != null) {
+            changed = mission.unregisterEntity(entityId);
+        }
+        for (int index = 0; index < pendingSiteCleanups.size(); index++) {
+            PendingSiteCleanup cleanup = pendingSiteCleanups.get(index);
+            if (!cleanup.missionId().equals(missionId)
+                    || !cleanup.entityIds().contains(entityId)) {
+                continue;
+            }
+            pendingSiteCleanups.set(index, cleanup.withoutEntity(entityId));
+            changed = true;
+        }
+        if (changed) {
+            setDirty();
+        }
+        return changed;
+    }
+
+    /** 事件层不知道任务 ID 时按 UUID 白名单反查；集合总长被硬限制为 48。 */
+    public boolean unregisterMissionEntity(UUID entityId) {
+        if (entityId == null) {
+            return false;
+        }
+        if (activeMission != null && activeMission.entityIds().contains(entityId)) {
+            return unregisterMissionEntity(activeMission.id(), entityId);
+        }
+        for (ActiveMission mission : optionalMissions) {
+            if (mission.entityIds().contains(entityId)) {
+                return unregisterMissionEntity(mission.id(), entityId);
+            }
+        }
+        for (PendingSiteCleanup cleanup : pendingSiteCleanups) {
+            if (cleanup.entityIds().contains(entityId)) {
+                return unregisterMissionEntity(cleanup.missionId(), entityId);
+            }
+        }
+        return false;
+    }
+
+    public Set<UUID> missionEntityIds(UUID missionId) {
+        LinkedHashSet<UUID> ids = new LinkedHashSet<>();
+        ActiveMission mission = missionForEntityIndex(missionId);
+        if (mission != null) {
+            ids.addAll(mission.entityIds());
+        }
+        for (PendingSiteCleanup cleanup : pendingSiteCleanups) {
+            if (cleanup.missionId().equals(missionId)) {
+                ids.addAll(cleanup.entityIds());
+            }
+        }
+        return Set.copyOf(ids);
+    }
+
+    /** 所有任务与延期清理记录的去重 UUID 占用。 */
+    public int missionEntityCount() {
+        return missionEntityIds().size();
+    }
+
+    private Set<UUID> missionEntityIds() {
+        LinkedHashSet<UUID> ids = new LinkedHashSet<>();
+        if (activeMission != null) {
+            ids.addAll(activeMission.entityIds());
+        }
+        optionalMissions.forEach(mission -> ids.addAll(mission.entityIds()));
+        pendingSiteCleanups.forEach(cleanup -> ids.addAll(cleanup.entityIds()));
+        return ids;
+    }
+
+    private ActiveMission missionForEntityIndex(UUID missionId) {
+        if (missionId == null) {
+            return null;
+        }
+        if (activeMission != null && activeMission.id().equals(missionId)) {
+            return activeMission;
+        }
+        for (ActiveMission mission : optionalMissions) {
+            if (mission.id().equals(missionId)) {
+                return mission;
+            }
+        }
+        return null;
+    }
+
+    /** 新字段加载时也按全局上限裁剪，主线优先，其次活动可选任务和延期清理。 */
+    private void enforceMissionEntityHardLimitOnLoad() {
+        LinkedHashSet<UUID> retained = new LinkedHashSet<>();
+        boolean changed = false;
+        List<ActiveMission> missions = new ArrayList<>();
+        if (activeMission != null) {
+            missions.add(activeMission);
+        }
+        missions.addAll(optionalMissions);
+        for (ActiveMission mission : missions) {
+            for (UUID entityId : mission.entityIds().stream().sorted().toList()) {
+                if (retained.size() < MissionEntityContainer.MAX_REGISTERED_ENTITIES
+                        && retained.add(entityId)) {
+                    continue;
+                }
+                changed |= mission.unregisterEntity(entityId);
+            }
+        }
+        for (int index = 0; index < pendingSiteCleanups.size(); index++) {
+            PendingSiteCleanup cleanup = pendingSiteCleanups.get(index);
+            LinkedHashSet<UUID> keptForCleanup = new LinkedHashSet<>();
+            for (UUID entityId : cleanup.entityIds().stream().sorted().toList()) {
+                if (retained.size() < MissionEntityContainer.MAX_REGISTERED_ENTITIES
+                        && retained.add(entityId)) {
+                    keptForCleanup.add(entityId);
+                } else {
+                    changed = true;
+                }
+            }
+            if (!keptForCleanup.equals(cleanup.entityIds())) {
+                pendingSiteCleanups.set(index, cleanup.withEntities(keptForCleanup));
+            }
+        }
+        if (changed) {
+            recordCorruptSave("mission_entity_index:hard_cap_or_duplicate");
+        }
+    }
+
     public boolean turnInMission() {
         if (activeMission == null || activeMission.stage() != MissionStage.READY_TO_TURN_IN) {
             return false;
@@ -2146,7 +2310,8 @@ public final class CampaignSavedData extends SavedData {
                 mission.id(),
                 mission.type(),
                 mission.site(),
-                mission.target()));
+                mission.target(),
+                mission.entityIds()));
     }
 
     private int activeOptionalCount() {
@@ -3296,7 +3461,26 @@ public final class CampaignSavedData extends SavedData {
             UUID missionId,
             MissionType type,
             BlockPos site,
-            int target) {
+            int target,
+            Set<UUID> entityIds) {
+        public PendingSiteCleanup {
+            missionId = Objects.requireNonNull(missionId, "missionId");
+            type = Objects.requireNonNull(type, "type");
+            site = Objects.requireNonNull(site, "site").immutable();
+            target = Math.max(1, target);
+            LinkedHashSet<UUID> capped = new LinkedHashSet<>();
+            if (entityIds != null) {
+                for (UUID entityId : entityIds) {
+                    if (entityId != null
+                            && capped.size()
+                                    < MissionEntityContainer.MAX_REGISTERED_ENTITIES) {
+                        capped.add(entityId);
+                    }
+                }
+            }
+            entityIds = Set.copyOf(capped);
+        }
+
         static PendingSiteCleanup load(CompoundTag tag) {
             UUID id;
             try {
@@ -3308,11 +3492,25 @@ public final class CampaignSavedData extends SavedData {
             if (type == null || !tag.contains("site")) {
                 return null;
             }
+            LinkedHashSet<UUID> entityIds = new LinkedHashSet<>();
+            ListTag entities = tag.getList("entity_ids", Tag.TAG_STRING);
+            for (int index = 0;
+                    index < entities.size()
+                            && entityIds.size()
+                                    < MissionEntityContainer.MAX_REGISTERED_ENTITIES;
+                    index++) {
+                try {
+                    entityIds.add(UUID.fromString(entities.getString(index)));
+                } catch (IllegalArgumentException ignored) {
+                    // 损坏项不影响其余延期清理记录。
+                }
+            }
             return new PendingSiteCleanup(
                     id,
                     type,
                     BlockPos.of(tag.getLong("site")),
-                    Math.max(1, tag.getInt("target")));
+                    Math.max(1, tag.getInt("target")),
+                    entityIds);
         }
 
         CompoundTag save() {
@@ -3321,7 +3519,24 @@ public final class CampaignSavedData extends SavedData {
             tag.putString("type", type.serializedName());
             tag.putLong("site", site.asLong());
             tag.putInt("target", target);
+            ListTag entities = new ListTag();
+            entityIds.stream()
+                    .sorted()
+                    .map(UUID::toString)
+                    .map(StringTag::valueOf)
+                    .forEach(entities::add);
+            tag.put("entity_ids", entities);
             return tag;
+        }
+
+        PendingSiteCleanup withoutEntity(UUID entityId) {
+            LinkedHashSet<UUID> retained = new LinkedHashSet<>(entityIds);
+            retained.remove(entityId);
+            return withEntities(retained);
+        }
+
+        PendingSiteCleanup withEntities(Set<UUID> entities) {
+            return new PendingSiteCleanup(missionId, type, site, target, entities);
         }
     }
 

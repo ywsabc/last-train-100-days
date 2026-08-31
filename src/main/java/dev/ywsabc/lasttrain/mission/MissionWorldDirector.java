@@ -11,6 +11,11 @@ import dev.ywsabc.lasttrain.text.TranslationKeys;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
+import java.util.function.ToIntFunction;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -20,6 +25,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.monster.Zombie;
 import net.minecraft.world.level.entity.EntityTypeTest;
@@ -519,16 +525,21 @@ public final class MissionWorldDirector {
             CampaignSavedData data,
             ActiveMission mission) {
         String tag = missionEntityTag(mission);
-        List<Zombie> living = findTaggedZombies(level, mission, tag);
-        if (living.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
-            recordEntityGuard(data, mission, "scan_budget");
-        }
-
-        ZombieBlockadePolicy.Reconciliation reconciliation =
-                ZombieBlockadePolicy.reconcile(
-                        mission.target(),
-                        mission.progress(),
-                        living.size());
+        MissionEntityContainer<Entity> entities = entityContainer(level, data);
+        claimLegacyZombies(level, data, mission, tag, entities);
+        IndexedReconciliation reconciliation = reconcileIndexedEntities(
+                entities,
+                mission.id(),
+                mission.target(),
+                mission.progress(),
+                mission.site(),
+                entity -> entity instanceof Zombie zombie
+                        && zombie.isAlive()
+                        && !zombie.isRemoved()
+                        && zombie.getTags().contains(tag),
+                entity -> entity.position().distanceToSqr(Vec3.atCenterOf(mission.site())),
+                entity -> entity.tickCount,
+                Entity::getUUID);
         if (reconciliation.hardCapApplied()) {
             recordEntityGuard(data, mission, "hard_cap");
         }
@@ -538,19 +549,14 @@ public final class MissionWorldDirector {
         if (reconciliation.discardBudgetApplied()) {
             recordEntityGuard(data, mission, "discard_budget");
         }
-        Vec3 siteCenter = Vec3.atCenterOf(mission.site());
-        living.sort((left, right) -> ZombieBlockadePolicy.compareForEviction(
-                left.position().distanceToSqr(siteCenter),
-                left.tickCount,
-                left.getUUID(),
-                right.position().distanceToSqr(siteCenter),
-                right.tickCount,
-                right.getUUID()));
-        for (int index = 0; index < reconciliation.toDiscard(); index++) {
-            living.get(index).discard();
+        if (reconciliation.globalCapSuppressedSpawn()) {
+            recordEntityGuard(data, mission, "global_hard_cap");
+        }
+        if (reconciliation.recovered() > 0) {
+            recordEntityGuard(data, mission, "offsite_recovered");
         }
 
-        int retained = living.size() - reconciliation.toDiscard();
+        int retained = reconciliation.indexedAfterRecycle();
         for (int index = 0; index < reconciliation.toSpawn(); index++) {
             Zombie zombie = EntityType.ZOMBIE.create(level);
             if (zombie == null) {
@@ -574,22 +580,87 @@ public final class MissionWorldDirector {
                     0.0F);
             zombie.setPersistenceRequired();
             zombie.addTag(tag);
+            // 先在持久化索引中预留，再把实体加入世界；崩溃窗口不会产生一个
+            // 未计数的持久化僵尸，加入失败则立即释放预留。
+            if (!entities.register(mission.id(), zombie)) {
+                recordEntityGuard(data, mission, "global_hard_cap");
+                return true;
+            }
             if (!level.addFreshEntity(zombie)) {
+                entities.unregister(mission.id(), zombie.getUUID());
                 return false;
             }
         }
         return true;
     }
 
-    private static List<Zombie> findTaggedZombies(
+    /**
+     * schema 12 以前的任务只有标签没有 UUID 索引。兼容认领严格限制在管理 AABB，
+     * 并在预算内收敛完成后永久标记；正常对账永远只查询 UUID。
+     */
+    private static void claimLegacyZombies(
             ServerLevel level,
+            CampaignSavedData data,
             ActiveMission mission,
-            String tag) {
-        return findTaggedZombies(
+            String tag,
+            MissionEntityContainer<Entity> entities) {
+        if (mission.entityIndexInitialized()) {
+            return;
+        }
+        List<Zombie> nearby = findTaggedZombies(
                 level,
                 mission,
                 tag,
                 ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+        Vec3 siteCenter = Vec3.atCenterOf(mission.site());
+        // 先认领最近的旧实体，把较远候选留给淘汰路径；这样迁移后仍保持
+        // A-fix2 的“最远、最老优先淘汰”语义。
+        nearby.sort((left, right) -> ZombieBlockadePolicy.compareForEviction(
+                right.position().distanceToSqr(siteCenter),
+                right.tickCount,
+                right.getUUID(),
+                left.position().distanceToSqr(siteCenter),
+                left.tickCount,
+                left.getUUID()));
+        int desired = ZombieBlockadePolicy.reconcile(
+                        mission.target(),
+                        mission.progress(),
+                        0)
+                .desiredLiving();
+        int indexedSurplus = Math.max(0, entities.count(mission.id()) - desired);
+        int discardBudget = Math.max(
+                0,
+                ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK - indexedSurplus);
+        int discarded = 0;
+        boolean discardBudgetApplied = false;
+        for (Zombie zombie : nearby) {
+            if (entities.registeredIds(mission.id()).contains(zombie.getUUID())) {
+                continue;
+            }
+            if (entities.count(mission.id()) < desired
+                    && entities.register(mission.id(), zombie)) {
+                continue;
+            }
+            if (discarded >= discardBudget) {
+                discardBudgetApplied = true;
+                continue;
+            }
+            zombie.discard();
+            discarded++;
+        }
+        boolean scanBudgetApplied =
+                nearby.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK;
+        if (scanBudgetApplied) {
+            recordEntityGuard(data, mission, "scan_budget");
+        }
+        if (discardBudgetApplied) {
+            recordEntityGuard(data, mission, "discard_budget");
+        }
+        // 扫描截断或淘汰预算耗尽时，下轮继续兼容认领；不能提前把仍存活的
+        // 旧标签实体永久排除在 UUID 索引之外。
+        if (!scanBudgetApplied && !discardBudgetApplied) {
+            data.markMissionEntityIndexInitialized(mission.id());
+        }
     }
 
     private static List<Zombie> findTaggedZombies(
@@ -600,9 +671,9 @@ public final class MissionWorldDirector {
         List<Zombie> living = new ArrayList<>();
         AABB bounds = AABB.ofSize(
                 Vec3.atCenterOf(mission.site()),
-                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D,
-                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D,
-                ZombieBlockadePolicy.RECONCILIATION_RADIUS * 2.0D);
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D,
+                ZombieBlockadePolicy.MANAGEMENT_RADIUS * 2.0D);
         level.getEntities(
                 EntityTypeTest.forClass(Zombie.class),
                 bounds,
@@ -612,6 +683,114 @@ public final class MissionWorldDirector {
                 living,
                 limit);
         return living;
+    }
+
+    /**
+     * 纯索引对账核心：未加载 UUID 仍参与计数；离场实体传送回现场并保留 UUID，
+     * 因而本 tick 以及后续 tick 都不会为它生成替代实体。
+     */
+    static <E> IndexedReconciliation reconcileIndexedEntities(
+            MissionEntityContainer<E> entities,
+            UUID missionId,
+            int target,
+            int progress,
+            BlockPos site,
+            Predicate<E> usable,
+            ToDoubleFunction<E> distanceSquared,
+            ToIntFunction<E> ageTicks,
+            Function<E, UUID> entityId) {
+        int recovered = 0;
+        List<IndexedEntity> loaded = new ArrayList<>();
+        double managementRadiusSquared = ZombieBlockadePolicy.MANAGEMENT_RADIUS
+                * ZombieBlockadePolicy.MANAGEMENT_RADIUS;
+        for (UUID id : entities.registeredIds(missionId)) {
+            Optional<E> found = entities.find(missionId, id);
+            if (found.isEmpty()) {
+                // 未加载不等于死亡；保留 UUID 才能形成真正的任务级硬上限。
+                continue;
+            }
+            E entity = found.orElseThrow();
+            if (!usable.test(entity)) {
+                entities.recycle(missionId, id);
+                continue;
+            }
+            double distance = distanceSquared.applyAsDouble(entity);
+            if (distance > managementRadiusSquared
+                    && entities.recover(missionId, id, site)) {
+                recovered++;
+            }
+            loaded.add(new IndexedEntity(
+                    entityId.apply(entity),
+                    distance,
+                    ageTicks.applyAsInt(entity)));
+        }
+
+        ZombieBlockadePolicy.Reconciliation initial = ZombieBlockadePolicy.reconcile(
+                target,
+                progress,
+                entities.count(missionId));
+        loaded.sort((left, right) -> ZombieBlockadePolicy.compareForEviction(
+                left.distanceSquared(),
+                left.ageTicks(),
+                left.id(),
+                right.distanceSquared(),
+                right.ageTicks(),
+                right.id()));
+        int recycled = 0;
+        for (IndexedEntity candidate : loaded) {
+            if (recycled >= initial.toDiscard()) {
+                break;
+            }
+            if (entities.recycle(missionId, candidate.id())) {
+                recycled++;
+            }
+        }
+
+        int indexed = entities.count(missionId);
+        ZombieBlockadePolicy.Reconciliation afterRecycle = ZombieBlockadePolicy.reconcile(
+                target,
+                progress,
+                indexed);
+        int toSpawn = Math.min(afterRecycle.toSpawn(), entities.remainingCapacity());
+        return new IndexedReconciliation(
+                indexed,
+                toSpawn,
+                recovered,
+                recycled,
+                initial.hardCapApplied() || toSpawn < afterRecycle.toSpawn(),
+                afterRecycle.spawnBudgetApplied(),
+                initial.discardBudgetApplied(),
+                toSpawn < afterRecycle.toSpawn());
+    }
+
+    /** 清理 UUID 白名单中的全部已加载实体；任何未加载项都会让清理继续延期。 */
+    static <E> boolean recycleMissionEntities(
+            MissionEntityContainer<E> entities,
+            UUID missionId) {
+        for (UUID entityId : entities.registeredIds(missionId)) {
+            entities.recycle(missionId, entityId);
+        }
+        return entities.count(missionId) == 0;
+    }
+
+    static MissionEntityContainer<Entity> entityContainer(
+            ServerLevel level,
+            CampaignSavedData data) {
+        return new ServerMissionEntityContainer(level, data);
+    }
+
+    private record IndexedEntity(UUID id, double distanceSquared, int ageTicks) {
+    }
+
+    record IndexedReconciliation(
+            int indexedAfterRecycle,
+            int toSpawn,
+            int recovered,
+            int recycled,
+            boolean hardCapApplied,
+            boolean spawnBudgetApplied,
+            boolean discardBudgetApplied,
+            boolean globalCapSuppressedSpawn) {
     }
 
     private static void recordEntityGuard(
@@ -729,14 +908,24 @@ public final class MissionWorldDirector {
                 }
             }
             case ZOMBIE_BLOCKADE -> {
+                CampaignSavedData data = CampaignSavedData.get(level.getServer());
+                MissionEntityContainer<Entity> entities = entityContainer(level, data);
+                int indexedBeforeRecycle = entities.count(mission.id());
+                if (!recycleMissionEntities(entities, mission.id())) {
+                    return false;
+                }
+                int remainingDiscardBudget = Math.max(
+                        0,
+                        ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK - indexedBeforeRecycle);
                 String tag = missionEntityTag(mission);
                 List<Zombie> living = findTaggedZombies(
                         level,
                         mission,
                         tag,
-                        ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK);
+                        remainingDiscardBudget);
                 living.forEach(Zombie::discard);
-                if (living.size() >= ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK) {
+                if (remainingDiscardBudget == 0
+                        || living.size() >= remainingDiscardBudget) {
                     return false;
                 }
             }
