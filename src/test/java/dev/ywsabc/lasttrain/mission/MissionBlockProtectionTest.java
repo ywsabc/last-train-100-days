@@ -43,7 +43,9 @@ class MissionBlockProtectionTest {
         assertFalse(MissionWorldDirector.isProtectedMissionBlock(unprepared, SITE));
 
         ActiveMission ready = prepared(MissionType.STATION_POWER);
-        ready.setObservedProgress(ready.target());
+        while (ready.stage() == MissionStage.ACTIVE) {
+            ready.setObservedProgress(ready.target());
+        }
         assertFalse(MissionWorldDirector.isProtectedMissionBlock(ready, SITE));
 
         ActiveMission rail = prepared(MissionType.RAIL_BREAK);

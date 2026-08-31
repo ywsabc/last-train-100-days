@@ -243,7 +243,7 @@ public final class CampaignPacingPolicy {
         return switch (roll % 3) {
             case 0 -> MissionType.RAIL_BREAK;
             case 1 -> MissionType.STATION_POWER;
-            default -> MissionType.STATION_GATE;
+            default -> MissionType.TRACK_CLEARANCE;
         };
     }
 
@@ -289,7 +289,7 @@ public final class CampaignPacingPolicy {
      */
     public enum KeyMission {
         PROLOGUE_DEPARTURE(Chapter.PROLOGUE, 1, MissionType.RAIL_BREAK),
-        FIRST_CITY_STATION(Chapter.SCARCITY, 8, MissionType.STATION_GATE),
+        FIRST_CITY_STATION(Chapter.SCARCITY, 8, MissionType.STATION_POWER),
         TUNNEL(Chapter.SPREAD, 24, MissionType.TRACK_CLEARANCE),
         COMPOUND_LOCATION(Chapter.COLLAPSE, 40, MissionType.STATION_POWER),
         FINALE_HUB_CLUE(Chapter.FINAL_LEG, 56, MissionType.SUPPLY_RECOVERY);

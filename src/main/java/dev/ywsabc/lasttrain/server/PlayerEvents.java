@@ -274,7 +274,8 @@ public final class PlayerEvents {
                     mission.progress(),
                     mission.target(),
                     mission.routeSegment(),
-                    Component.translatable(TranslationKeys.missionStage(mission.stage()))));
+                    Component.translatable(TranslationKeys.missionStage(mission.stage())),
+                    Component.translatable(TranslationKeys.missionPhase(mission.currentPhase()))));
         }
     }
 

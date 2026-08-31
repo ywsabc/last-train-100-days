@@ -2,6 +2,7 @@ package dev.ywsabc.lasttrain.campaign;
 
 import dev.ywsabc.lasttrain.LastTrain;
 import dev.ywsabc.lasttrain.mission.ActiveMission;
+import dev.ywsabc.lasttrain.mission.CriticalMissionItemRegistry;
 import dev.ywsabc.lasttrain.mission.MissionPoolPolicy;
 import dev.ywsabc.lasttrain.mission.MissionStage;
 import dev.ywsabc.lasttrain.mission.MissionType;
@@ -14,6 +15,7 @@ import dev.ywsabc.lasttrain.route.RouteProgressPolicy;
 import dev.ywsabc.lasttrain.route.RouteSegmentPlan;
 import dev.ywsabc.lasttrain.route.RouteSegmentPlanner;
 import dev.ywsabc.lasttrain.route.RouteTemplateConfig;
+import dev.ywsabc.lasttrain.route.RouteTurnout;
 import dev.ywsabc.lasttrain.route.SegmentTemplate;
 import dev.ywsabc.lasttrain.server.TrainRecoveryPolicy;
 import dev.ywsabc.lasttrain.testing.FaultInjection;
@@ -30,6 +32,7 @@ import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.IntTag;
@@ -59,6 +62,7 @@ public final class CampaignSavedData extends SavedData {
     public static final int DEFAULT_ROUTE_PLAN_AHEAD = 8;
     /** Hard deserialization cap for the pending route plan list. */
     public static final int MAX_ROUTE_PLANS_ON_LOAD = 1024;
+    public static final int MAX_ROUTE_TURNOUTS = 128;
     private static final String DATA_NAME = LastTrain.MOD_ID + "_campaign";
     private static final Factory<CampaignSavedData> FACTORY =
             new Factory<>(CampaignSavedData::new, CampaignSavedData::load);
@@ -80,6 +84,8 @@ public final class CampaignSavedData extends SavedData {
     private RouteSegmentPlanner.Cursor routePlanCursor = RouteSegmentPlanner.Cursor.fresh();
     /** Pending plans for segments above {@code generatedRouteSegment}. */
     private final List<RouteSegmentPlan> routePlans = new ArrayList<>();
+    /** 已真实物化且尚未被道岔任务占用的分支现场。 */
+    private final List<RouteTurnout> routeTurnouts = new ArrayList<>();
     /** Memory-only planner, rebuilt lazily from the persisted state. */
     private RouteSegmentPlanner routePlanner;
     private CampaignMode mode = CampaignMode.STORY_100_DAYS;
@@ -310,6 +316,7 @@ public final class CampaignSavedData extends SavedData {
         loadUuidSet(tag, "starter_gun_recipients", data.starterGunRecipients);
         loadOptionalState(tag, registries, data);
         loadRoutePlanState(tag, data);
+        loadRouteTurnouts(tag, data);
         return loadedSchema;
     }
 
@@ -367,6 +374,7 @@ public final class CampaignSavedData extends SavedData {
         tag.put("starter_gun_recipients", saveUuidSet(starterGunRecipients));
         saveOptionalState(tag, registries);
         saveRoutePlanState(tag);
+        tag.put("route_turnouts", saveRouteTurnouts(routeTurnouts));
         return tag;
     }
 
@@ -685,6 +693,51 @@ public final class CampaignSavedData extends SavedData {
         return List.copyOf(routePlans);
     }
 
+    /** RouteDirector 在分支物理提交成功后登记道岔；重复 tick 不会重复登记。 */
+    public void recordRouteTurnouts(List<RouteTurnout> turnouts) {
+        Objects.requireNonNull(turnouts, "turnouts");
+        boolean changed = false;
+        for (RouteTurnout turnout : turnouts) {
+            if (turnout == null
+                    || turnout.segment() > generatedRouteSegment
+                    || routeTurnouts.stream().anyMatch(existing ->
+                            existing.junction().equals(turnout.junction()))) {
+                continue;
+            }
+            routeTurnouts.add(turnout);
+            changed = true;
+        }
+        routeTurnouts.sort(java.util.Comparator
+                .comparingInt(RouteTurnout::segment)
+                .thenComparingLong(turnout -> turnout.junction().asLong()));
+        while (routeTurnouts.size() > MAX_ROUTE_TURNOUTS) {
+            routeTurnouts.removeFirst();
+            changed = true;
+        }
+        if (changed) {
+            setDirty();
+        }
+    }
+
+    public List<RouteTurnout> routeTurnouts() {
+        return List.copyOf(routeTurnouts);
+    }
+
+    public boolean hasAvailableRouteTurnout() {
+        return routeTurnouts.stream().anyMatch(turnout -> turnout.segment() > routeSegment);
+    }
+
+    private RouteTurnout claimNextRouteTurnout() {
+        for (int index = 0; index < routeTurnouts.size(); index++) {
+            RouteTurnout turnout = routeTurnouts.get(index);
+            if (turnout.segment() > routeSegment) {
+                routeTurnouts.remove(index);
+                return turnout;
+            }
+        }
+        return null;
+    }
+
     /**
      * Trims the persisted pending plan list after segment {@code segment} was
      * realized. The planner keeps its memoized copy for the session; only the
@@ -874,6 +927,44 @@ public final class CampaignSavedData extends SavedData {
         tag.put("route_plan_state", state);
     }
 
+    private static void loadRouteTurnouts(CompoundTag tag, CampaignSavedData data) {
+        ListTag entries = tag.getList("route_turnouts", Tag.TAG_COMPOUND);
+        for (int index = 0;
+                index < entries.size() && data.routeTurnouts.size() < MAX_ROUTE_TURNOUTS;
+                index++) {
+            CompoundTag entry = entries.getCompound(index);
+            int segment = entry.getInt("segment");
+            Direction direction = Direction.byName(entry.getString("branch_direction"));
+            if (segment < 1 || segment > data.generatedRouteSegment || direction == null) {
+                continue;
+            }
+            try {
+                RouteTurnout turnout = new RouteTurnout(
+                        segment,
+                        BlockPos.of(entry.getLong("junction")),
+                        direction);
+                if (data.routeTurnouts.stream().noneMatch(existing ->
+                        existing.junction().equals(turnout.junction()))) {
+                    data.routeTurnouts.add(turnout);
+                }
+            } catch (IllegalArgumentException ignored) {
+                // 损坏的单条道岔引用直接丢弃，不影响其余线路和战役加载。
+            }
+        }
+    }
+
+    private static ListTag saveRouteTurnouts(List<RouteTurnout> turnouts) {
+        ListTag entries = new ListTag();
+        for (RouteTurnout turnout : turnouts) {
+            CompoundTag entry = new CompoundTag();
+            entry.putInt("segment", turnout.segment());
+            entry.putLong("junction", turnout.junction().asLong());
+            entry.putString("branch_direction", turnout.branchDirection().getName());
+            entries.add(entry);
+        }
+        return entries;
+    }
+
     private static CompoundTag saveVote(TeamPermissionPolicy.Vote vote) {
         CompoundTag tag = new CompoundTag();
         tag.putString("operation", vote.operation().serializedName());
@@ -917,7 +1008,7 @@ public final class CampaignSavedData extends SavedData {
                 "scheduled_key_missions", "starter_kit_recipients",
                 "starter_gun_recipients", "optional_missions", "reward_receipts",
                 "pending_cleanups", "mission_history", "team_members",
-                "safe_mode_reasons", "integrity_events");
+                "safe_mode_reasons", "integrity_events", "route_turnouts");
         validateTypes(tag, data, Tag.TAG_ANY_NUMERIC,
                 "schema_version", "campaign_seed", "route_rules_version", "day",
                 "active_ticks_into_day", "total_active_ticks", "route_segment",
@@ -1533,6 +1624,7 @@ public final class CampaignSavedData extends SavedData {
             int teamSize,
             InfectionPolicy.Stage intensityStage) {
         if (type == null
+                || type == MissionType.STATION_GATE
                 || !FinalePolicy.allowsOrdinaryMission(mode, status, day)
                 || (type.blocksRoute()
                         && !FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day))
@@ -1541,11 +1633,20 @@ public final class CampaignSavedData extends SavedData {
                 || !MissionPoolPolicy.mayCreateMainline(missionHistory, type)) {
             return false;
         }
+        RouteTurnout turnout = type == MissionType.SWITCH_SIGNAL
+                ? claimNextRouteTurnout()
+                : null;
+        if (type == MissionType.SWITCH_SIGNAL && turnout == null) {
+            return false;
+        }
         int target = PopulationScalingPolicy.missionTarget(
                 type,
                 teamSize,
                 intensityStage);
         activeMission = ActiveMission.create(type, day, routeSegment, target);
+        if (turnout != null) {
+            activeMission.assignSite(turnout.junction(), turnout.branchDirection());
+        }
         activeKeyMission = null;
         missionSequence++;
         setDirty();
@@ -1578,7 +1679,7 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean addMissionProgress(int amount) {
-        if (activeMission == null || !activeMission.addProgress(amount)) {
+        if (activeMission == null || !activeMission.addProgress(amount, day)) {
             return false;
         }
         setDirty();
@@ -1586,9 +1687,26 @@ public final class CampaignSavedData extends SavedData {
     }
 
     public boolean setMissionObservedProgress(int progress) {
-        if (activeMission == null || !activeMission.setObservedProgress(progress)) {
+        if (activeMission == null || !activeMission.setObservedProgress(progress, day)) {
             return false;
         }
+        setDirty();
+        return true;
+    }
+
+    /** 当前阶段失败只降低本阶段进度，不清空任务或推进到下一阶段。 */
+    public boolean failMissionPhase(int progressPenalty) {
+        return failMissionPhase(progressPenalty, 0);
+    }
+
+    /** 阶段降级可施加压力代价，但仍保留同一个任务 ID、现场和阶段索引。 */
+    public boolean failMissionPhase(int progressPenalty, int threatPenalty) {
+        if (activeMission == null
+                || !activeMission.type().sequential()
+                || !activeMission.failCurrentPhase(day, Math.max(0, progressPenalty))) {
+            return false;
+        }
+        threat = (int) Math.min(100L, (long) threat + Math.max(0, threatPenalty));
         setDirty();
         return true;
     }
@@ -1604,6 +1722,38 @@ public final class CampaignSavedData extends SavedData {
     public boolean markMissionWorldPrepared() {
         if (activeMission == null || !activeMission.markWorldPrepared()) {
             return false;
+        }
+        setDirty();
+        return true;
+    }
+
+    /** 补发前先持久推进代次，使世界中任何旧副本都不能再核销。 */
+    public long issueMissionCriticalItem() {
+        if (activeMission == null
+                || CriticalMissionItemRegistry.requiredBy(activeMission).isEmpty()) {
+            return -1L;
+        }
+        long generation = activeMission.issueCriticalItem();
+        if (generation > 0L) {
+            setDirty();
+        }
+        return generation;
+    }
+
+    /** 核销当前代次一次；可直接完成的工具阶段在同一权威写操作里推进。 */
+    public boolean redeemMissionCriticalItem(
+            CriticalMissionItemRegistry.Key key,
+            long generation) {
+        if (activeMission == null
+                || key == null
+                || CriticalMissionItemRegistry.requiredBy(activeMission)
+                        .filter(required -> required == key)
+                        .isEmpty()
+                || !activeMission.redeemCriticalItem(generation)) {
+            return false;
+        }
+        if (key.completesPhaseOnRedeem()) {
+            activeMission.addProgress(activeMission.target(), day);
         }
         setDirty();
         return true;
@@ -2514,7 +2664,7 @@ public final class CampaignSavedData extends SavedData {
                 InfectionPolicy.eventChance(0.30D + day * 0.004D, stage));
         if (random.nextDouble() < chance) {
             any = MissionPoolPolicy.selectMainMissionType(missionHistory, random)
-                    .map(this::createMission)
+                    .map(this::createDirectorMission)
                     .orElse(false);
         }
         if (random.nextDouble() < InfectionPolicy.eventChance(0.45D, stage)) {
@@ -2562,11 +2712,24 @@ public final class CampaignSavedData extends SavedData {
                 mode,
                 day,
                 routeSegment);
+        // 道岔任务只占用 RouteDirector 已确认物化的真实分支；没有现场时继续使用
+        // 清障任务，绝不在直线路段凭空生成假道岔。
+        if (type == MissionType.TRACK_CLEARANCE && hasAvailableRouteTurnout()) {
+            type = MissionType.SWITCH_SIGNAL;
+        }
         if (!FinalePolicy.allowsOrdinaryMainlineMission(mode, status, day)
                 && type.blocksRoute()) {
             // The last-ten-day window can still offer supplies, but never
             // spends its only active slot on a fresh ordinary roadblock.
             type = MissionType.SUPPLY_RECOVERY;
+        }
+        return createMission(type);
+    }
+
+    private boolean createDirectorMission(MissionType selected) {
+        MissionType type = selected;
+        if (type == MissionType.SWITCH_SIGNAL && !hasAvailableRouteTurnout()) {
+            type = MissionType.TRACK_CLEARANCE;
         }
         return createMission(type);
     }

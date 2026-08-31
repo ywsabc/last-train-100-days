@@ -235,6 +235,7 @@ public final class LastTrainCommands {
                         Component.translatable(TranslationKeys.mission(mission.type())),
                         mission.id(),
                         Component.translatable(TranslationKeys.missionStage(mission.stage())),
+                        Component.translatable(TranslationKeys.missionPhase(mission.phase())),
                         mission.progress(),
                         mission.target(),
                         mission.routeSegment()),
@@ -1039,7 +1040,8 @@ public final class LastTrainCommands {
                 mission.progress(),
                 mission.target(),
                 mission.routeSegment(),
-                Component.translatable(TranslationKeys.missionStage(mission.stage())));
+                Component.translatable(TranslationKeys.missionStage(mission.stage())),
+                Component.translatable(TranslationKeys.missionPhase(mission.currentPhase())));
     }
 
     /** Pre-acceptance briefing: type, risk, reward category and time limit. */

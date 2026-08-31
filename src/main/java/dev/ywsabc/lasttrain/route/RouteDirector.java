@@ -142,6 +142,7 @@ public final class RouteDirector {
                             nextSegment,
                             outcome.mainlineComplete(),
                             outcome.branchResults())) {
+                data.recordRouteTurnouts(outcome.turnouts());
                 lastReportedTongDaSegment = -1;
                 lastReportedTongDaStatus = null;
                 LastTrain.LOGGER.info(
@@ -334,7 +335,7 @@ public final class RouteDirector {
             // The main line is not physically complete yet: branch runs are
             // not attempted and the segment cannot commit. The eastbound XO
             // corridor keeps advancing normally across ticks.
-            return new SegmentGeneration(false, List.of());
+            return new SegmentGeneration(false, List.of(), turnouts(layout));
         }
 
         if (layout.hasPlatform()) {
@@ -355,7 +356,7 @@ public final class RouteDirector {
             reportBranchStatus(segment, section, attempt);
             branchResults.add(attempt.result());
         }
-        return new SegmentGeneration(true, branchResults);
+        return new SegmentGeneration(true, branchResults, turnouts(layout));
     }
 
     /**
@@ -477,11 +478,35 @@ public final class RouteDirector {
     /** Evidence of one materialization round, feeding the pure commit gate. */
     public record SegmentGeneration(
             boolean mainlineComplete,
-            List<TongDaTrackBridge.SubmissionResult> branchResults) {
+            List<TongDaTrackBridge.SubmissionResult> branchResults,
+            List<RouteTurnout> turnouts) {
+        public SegmentGeneration(
+                boolean mainlineComplete,
+                List<TongDaTrackBridge.SubmissionResult> branchResults) {
+            this(mainlineComplete, branchResults, List.of());
+        }
+
         public SegmentGeneration {
             branchResults = List.copyOf(
                     java.util.Objects.requireNonNull(branchResults, "branchResults"));
+            turnouts = List.copyOf(java.util.Objects.requireNonNull(turnouts, "turnouts"));
         }
+    }
+
+    /** 从 RouteDirector 已提交的真实分支线路提取任务现场，不另造虚假道岔。 */
+    static List<RouteTurnout> turnouts(RouteSegmentLayout layout) {
+        List<RouteTurnout> result = new java.util.ArrayList<>();
+        List<BlockPos> junctions = layout.turnPoints();
+        List<RouteSegmentLayout.BranchTrackSection> branches = layout.branchTrackSections();
+        for (int index = 0; index < branches.size(); index++) {
+            RouteSegmentLayout.BranchTrackSection branch = branches.get(index);
+            BlockPos junction = index < junctions.size() ? junctions.get(index) : branch.start();
+            result.add(new RouteTurnout(
+                    layout.plan().segmentIndex(),
+                    junction,
+                    branch.direction()));
+        }
+        return List.copyOf(result);
     }
 
     private static void reportBranchStatus(

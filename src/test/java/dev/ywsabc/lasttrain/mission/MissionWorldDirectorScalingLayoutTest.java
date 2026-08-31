@@ -38,6 +38,7 @@ class MissionWorldDirectorScalingLayoutTest {
     void scaledTargetsCreateUniqueDeterministicOffsets() {
         for (MissionType type : MissionType.values()) {
             if (type == MissionType.ZOMBIE_BLOCKADE
+                    || type == MissionType.SWITCH_SIGNAL
                     || type == MissionType.RESCUE_SURVIVOR
                     || type == MissionType.SALVAGE_CAR) {
                 continue;

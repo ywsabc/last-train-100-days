@@ -174,6 +174,10 @@ public final class RewardOutboxPolicy {
                     RewardItem.item("minecraft:iron_ingot", 4),
                     RewardItem.item("minecraft:coal", 8),
                     RewardItem.item("minecraft:torch", 12));
+            case SWITCH_SIGNAL -> List.of(
+                    RewardItem.item("minecraft:redstone", 8),
+                    RewardItem.item("minecraft:copper_ingot", 6),
+                    RewardItem.item("minecraft:iron_ingot", 4));
             case ZOMBIE_BLOCKADE -> List.of(
                     RewardItem.item("minecraft:arrow", 16),
                     RewardItem.item("minecraft:bread", 8),

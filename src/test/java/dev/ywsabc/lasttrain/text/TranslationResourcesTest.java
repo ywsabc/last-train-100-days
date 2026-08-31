@@ -45,6 +45,9 @@ class TranslationResourcesTest {
         for (MissionStage value : MissionStage.values()) {
             assertPresent(keys, TranslationKeys.missionStage(value));
         }
+        for (MissionType.MissionPhase value : MissionType.MissionPhase.values()) {
+            assertPresent(keys, TranslationKeys.missionPhase(value));
+        }
         for (PursuitPolicy.AttentionLevel value : PursuitPolicy.AttentionLevel.values()) {
             assertPresent(keys, TranslationKeys.attention(value));
         }
