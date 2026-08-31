@@ -89,6 +89,35 @@ class ZombieBlockadePolicyTest {
     }
 
     @Test
+    void oversizedLegacyPopulationDiscardsSixtyFourPerReconciliation() {
+        ZombieBlockadePolicy.Reconciliation result = ZombieBlockadePolicy.reconcile(
+                4_096,
+                0,
+                ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+
+        assertEquals(48, result.desiredLiving());
+        assertEquals(ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK, result.toDiscard());
+        assertFalse(result.discardBudgetApplied());
+    }
+
+    @Test
+    void largeLegacyPopulationConvergesAtTheConfiguredRate() {
+        int living = 1_000;
+        int rounds = 0;
+        while (living > ZombieBlockadePolicy.MAX_MANAGED_ZOMBIES) {
+            int observed = Math.min(living, ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+            ZombieBlockadePolicy.Reconciliation result =
+                    ZombieBlockadePolicy.reconcile(4_096, 0, observed);
+            assertTrue(result.toDiscard() <= ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK);
+            living -= result.toDiscard();
+            rounds++;
+        }
+
+        assertEquals(ZombieBlockadePolicy.MAX_MANAGED_ZOMBIES, living);
+        assertEquals(15, rounds);
+    }
+
+    @Test
     void evictionPrefersFarthestThenOldestEntity() {
         UUID nearest = new UUID(0L, 1L);
         UUID farYoung = new UUID(0L, 2L);

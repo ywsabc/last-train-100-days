@@ -141,6 +141,8 @@ public final class CampaignSavedData extends SavedData {
     private ActiveMission proposedMission;
     private final List<ActiveMission> optionalMissions = new ArrayList<>();
     private final Map<UUID, RewardReceipt> rewardReceipts = new LinkedHashMap<>();
+    /** Schema 11 扩展：箱体标记之外的第二份已完成投递证明。 */
+    private final Set<String> completedRewardOperationIds = new LinkedHashSet<>();
     private final List<PendingSiteCleanup> pendingSiteCleanups = new ArrayList<>();
     private final List<MissionPoolPolicy.Entry> missionHistory = new ArrayList<>();
     private final Set<UUID> teamMembers = new LinkedHashSet<>();
@@ -471,6 +473,7 @@ public final class CampaignSavedData extends SavedData {
             data.optionalMissions.add(mission);
         }
         loadRewardReceipts(tag, data);
+        loadCompletedRewardOperations(tag, data);
         ListTag cleanups = tag.getList("pending_cleanups", Tag.TAG_COMPOUND);
         for (int index = 0; index < cleanups.size(); index++) {
             if (data.pendingSiteCleanups.size() >= MAX_PENDING_CLEANUPS) {
@@ -570,6 +573,28 @@ public final class CampaignSavedData extends SavedData {
         }
     }
 
+    private static void loadCompletedRewardOperations(
+            CompoundTag tag,
+            CampaignSavedData data) {
+        ListTag operations = tag.getList("completed_reward_operations", Tag.TAG_STRING);
+        Set<String> knownOperations = new HashSet<>();
+        for (RewardReceipt receipt : data.rewardReceipts.values()) {
+            knownOperations.add(RewardOutboxPolicy.operationId(receipt.missionId()));
+        }
+        for (int index = 0;
+                index < operations.size()
+                        && data.completedRewardOperationIds.size()
+                                < RewardOutboxPolicy.MAX_RECEIPTS;
+                index++) {
+            String operationId = operations.getString(index);
+            if (knownOperations.contains(operationId)) {
+                data.completedRewardOperationIds.add(operationId);
+            } else if (!operationId.isBlank()) {
+                data.recordCorruptSave("completed_reward_operations[" + index + "]:orphan");
+            }
+        }
+    }
+
     private static ActiveMission loadMissionSafely(
             CompoundTag tag,
             HolderLookup.Provider registries,
@@ -618,6 +643,11 @@ public final class CampaignSavedData extends SavedData {
         ListTag receipts = new ListTag();
         rewardReceipts.values().forEach(receipt -> receipts.add(receipt.save()));
         tag.put("reward_receipts", receipts);
+        ListTag completedOperations = new ListTag();
+        completedRewardOperationIds.stream()
+                .map(StringTag::valueOf)
+                .forEach(completedOperations::add);
+        tag.put("completed_reward_operations", completedOperations);
         ListTag cleanups = new ListTag();
         pendingSiteCleanups.forEach(cleanup -> cleanups.add(cleanup.save()));
         tag.put("pending_cleanups", cleanups);
@@ -993,6 +1023,7 @@ public final class CampaignSavedData extends SavedData {
         validateTypes(tag, data, Tag.TAG_LIST,
                 "scheduled_key_missions", "starter_kit_recipients",
                 "starter_gun_recipients", "optional_missions", "reward_receipts",
+                "completed_reward_operations",
                 "pending_cleanups", "mission_history", "team_members",
                 "safe_mode_reasons", "integrity_events", "first_joined",
                 "prepared_stations");
@@ -1748,7 +1779,10 @@ public final class CampaignSavedData extends SavedData {
         MissionType failedType = activeMission.type();
         activeMission = null;
         activeKeyMission = null;
-        threat = Math.min(100, threat + Math.max(0, threatPenalty));
+        threat = (int) Math.clamp(
+                (long) threat + Math.max(0, threatPenalty),
+                0L,
+                100L);
         recordMissionOutcome(failedType, MissionPoolPolicy.Outcome.FAILED);
         if (failedType == MissionType.ZOMBIE_BLOCKADE) {
             pursuitDistance = Math.max(
@@ -1924,11 +1958,9 @@ public final class CampaignSavedData extends SavedData {
     }
 
     /**
-     * Objective completion gate for optional missions: persists the
-     * REWARD_PENDING receipt before any world mutation happens, then the
-     * reward dispatcher executes the atomic crate fill and flips the receipt
-     * to CLAIMED in the same tick. The crate marker is the mutation authority;
-     * receipt/marker skew is reconciled on every dispatch tick.
+     * 可选任务完成门：任何世界写入之前先持久化 REWARD_PENDING 收据，再由奖励派发器
+     * 原子填箱并切换为 CLAIMED。箱体 marker 与存档完成集合共同作为投递证明，每轮
+     * 派发都会收敛三者偏差。
      */
     public boolean completeOptionalMission(UUID id) {
         ActiveMission mission = optionalMission(id).orElse(null);
@@ -1959,6 +1991,7 @@ public final class CampaignSavedData extends SavedData {
         if (receipt.state() != RewardOutboxPolicy.ReceiptState.CLAIMED) {
             rewardReceipts.put(id, receipt.claimed());
         }
+        completedRewardOperationIds.add(RewardOutboxPolicy.operationId(id));
         ActiveMission mission = optionalMission(id).orElse(null);
         if (mission != null && mission.stage() == MissionStage.REWARD_PENDING) {
             mission.transitionTo(MissionStage.COMPLETED);
@@ -1971,7 +2004,7 @@ public final class CampaignSavedData extends SavedData {
             if (victim == null) {
                 break;
             }
-            rewardReceipts.remove(victim);
+            removeRewardReceiptRecord(victim);
         }
         if (rewardReceipts.size() <= RewardOutboxPolicy.MAX_RECEIPTS) {
             resolveSafeModeReason(SafeModeReason.REWARD_OUTBOX_OVERFLOW);
@@ -1988,6 +2021,15 @@ public final class CampaignSavedData extends SavedData {
         return List.copyOf(rewardReceipts.values());
     }
 
+    /** 存档侧完成证明；箱体被破坏或替换后仍能阻止同一奖励重发。 */
+    public boolean hasCompletedRewardOperation(String operationId) {
+        return completedRewardOperationIds.contains(operationId);
+    }
+
+    public Set<String> completedRewardOperationIds() {
+        return Set.copyOf(completedRewardOperationIds);
+    }
+
     /**
      * Drops a CLAIMED receipt. Used by the crate marker cap so a marker
      * eviction always drops its receipt too; a PENDING receipt is never
@@ -1998,7 +2040,7 @@ public final class CampaignSavedData extends SavedData {
         if (receipt == null || receipt.state() != RewardOutboxPolicy.ReceiptState.CLAIMED) {
             return false;
         }
-        rewardReceipts.remove(id);
+        removeRewardReceiptRecord(id);
         setDirty();
         return true;
     }
@@ -2131,9 +2173,14 @@ public final class CampaignSavedData extends SavedData {
                 // evicted, even if that briefly exceeds the cap.
                 break;
             }
-            rewardReceipts.remove(victim);
+            removeRewardReceiptRecord(victim);
         }
         rewardReceipts.put(receipt.missionId(), receipt);
+    }
+
+    private void removeRewardReceiptRecord(UUID id) {
+        rewardReceipts.remove(id);
+        completedRewardOperationIds.remove(RewardOutboxPolicy.operationId(id));
     }
 
     private UUID oldestClaimedReceiptId() {
@@ -2683,7 +2730,7 @@ public final class CampaignSavedData extends SavedData {
                 || !TrainRecoveryPolicy.canRescue(rescueCount, lastRescueDay, day)) {
             return false;
         }
-        rescueCount++;
+        rescueCount = TrainRecoveryPolicy.incrementRescueCount(rescueCount);
         lastRescueDay = day;
         trainMissingTicks = 0;
         trainImmobileTicks = 0;
@@ -3185,11 +3232,9 @@ public final class CampaignSavedData extends SavedData {
     }
 
     /**
-     * Durable reward outbox entry. PENDING is persisted before the world
-     * mutation runs; the dispatcher flips it to CLAIMED after the atomic
-     * crate fill. The crate operation marker is the world-mutation authority;
-     * this receipt carries durable intent and acknowledgement so either store
-     * can be reconciled after a crash.
+     * 持久奖励 outbox 记录。PENDING 先于世界写入落盘；完整填箱后派发器再切换为
+     * CLAIMED。箱体 marker 与存档完成集合提供双重写入证明，收据保存投递意图与确认
+     * 状态，因此崩溃后仍可幂等收敛。
      */
     public record RewardReceipt(
             UUID missionId,

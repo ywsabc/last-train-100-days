@@ -216,6 +216,44 @@ class CampaignSavedDataOptionalMissionTest {
         assertEquals(
                 MissionPoolPolicy.Outcome.COMPLETED,
                 data.missionHistory().get(data.missionHistory().size() - 1).outcome());
+        assertTrue(data.hasCompletedRewardOperation(RewardOutboxPolicy.operationId(id)));
+    }
+
+    @Test
+    void completedRewardOperationsPersistInsideSchemaEleven() {
+        CampaignSavedData data = started();
+        assertTrue(data.proposeOptionalMission(MissionType.RESCUE_SURVIVOR));
+        UUID id = data.proposedMission().id();
+        data.acceptProposal(id, null);
+        data.recordSurvivorRescued(id);
+        data.completeOptionalMission(id);
+        assertTrue(data.markRewardClaimed(id));
+        String operationId = RewardOutboxPolicy.operationId(id);
+
+        CompoundTag saved = data.save(new CompoundTag(), null);
+        CampaignSavedData loaded = CampaignSavedData.load(saved, null);
+
+        assertEquals(11, saved.getInt("schema_version"));
+        assertEquals(1, saved.getList("completed_reward_operations", 8).size());
+        assertTrue(loaded.hasCompletedRewardOperation(operationId));
+        assertEquals(java.util.Set.of(operationId), loaded.completedRewardOperationIds());
+    }
+
+    @Test
+    void schemaElevenSaveWithoutCompletedOperationsDefaultsToEmpty() {
+        UUID id = UUID.randomUUID();
+        CompoundTag old = new CompoundTag();
+        old.putInt("schema_version", 11);
+        old.putString("campaign_id", UUID.randomUUID().toString());
+        old.putString("status", CampaignStatus.RUNNING.name());
+        ListTag receipts = new ListTag();
+        receipts.add(receiptTag(id, "CLAIMED"));
+        old.put("reward_receipts", receipts);
+
+        CampaignSavedData loaded = CampaignSavedData.load(old, null);
+
+        assertTrue(loaded.completedRewardOperationIds().isEmpty());
+        assertFalse(loaded.hasCompletedRewardOperation(RewardOutboxPolicy.operationId(id)));
     }
 
     @Test

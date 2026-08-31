@@ -8,7 +8,10 @@ final class ZombieBlockadePolicy {
     static final double RECONCILIATION_RADIUS = 48.0D;
     static final int MAX_MANAGED_ZOMBIES = 48;
     static final int MAX_SPAWNS_PER_TICK = 4;
-    static final int MAX_SCAN_RESULTS_PER_TICK = 64;
+    /** 每轮最多淘汰 64 个旧实体，兼顾收敛速度与单 tick 预算。 */
+    static final int MAX_DISCARDS_PER_TICK = 64;
+    static final int MAX_SCAN_RESULTS_PER_TICK =
+            MAX_MANAGED_ZOMBIES + MAX_DISCARDS_PER_TICK;
     static final int SCAN_FRAMES = 4;
     private static final double ACTIVATION_DISTANCE_SQUARED =
             ACTIVATION_DISTANCE * ACTIVATION_DISTANCE;
@@ -32,13 +35,15 @@ final class ZombieBlockadePolicy {
         int uncappedDesired = normalizedTarget - normalizedProgress;
         int desiredLiving = Math.min(MAX_MANAGED_ZOMBIES, uncappedDesired);
         int missing = Math.max(0, desiredLiving - normalizedLiving);
+        int surplus = Math.max(0, normalizedLiving - desiredLiving);
         return new Reconciliation(
                 desiredLiving,
                 Math.min(MAX_SPAWNS_PER_TICK, missing),
-                Math.max(0, normalizedLiving - desiredLiving),
+                Math.min(MAX_DISCARDS_PER_TICK, surplus),
                 uncappedDesired > MAX_MANAGED_ZOMBIES
                         || normalizedLiving > MAX_MANAGED_ZOMBIES,
-                missing > MAX_SPAWNS_PER_TICK);
+                missing > MAX_SPAWNS_PER_TICK,
+                surplus > MAX_DISCARDS_PER_TICK);
     }
 
     /** Farthest first, then oldest, with UUID as a deterministic tie-break. */
@@ -65,6 +70,7 @@ final class ZombieBlockadePolicy {
             int toSpawn,
             int toDiscard,
             boolean hardCapApplied,
-            boolean spawnBudgetApplied) {
+            boolean spawnBudgetApplied,
+            boolean discardBudgetApplied) {
     }
 }

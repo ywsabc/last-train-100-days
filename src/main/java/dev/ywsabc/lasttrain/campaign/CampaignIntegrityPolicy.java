@@ -150,6 +150,8 @@ public final class CampaignIntegrityPolicy {
         ASSEMBLED_TRAIN_WITHOUT_ID,
         CORRUPT_SAVE_DATA,
         TICK_EVALUATION_FAILURE,
+        TICK_EVALUATION_BACKOFF,
+        SAFE_MODE_WORLD_WRITE_SKIPPED,
         ENTITY_PERFORMANCE_GUARD
     }
 

@@ -535,6 +535,9 @@ public final class MissionWorldDirector {
         if (reconciliation.spawnBudgetApplied()) {
             recordEntityGuard(data, mission, "spawn_budget");
         }
+        if (reconciliation.discardBudgetApplied()) {
+            recordEntityGuard(data, mission, "discard_budget");
+        }
         Vec3 siteCenter = Vec3.atCenterOf(mission.site());
         living.sort((left, right) -> ZombieBlockadePolicy.compareForEviction(
                 left.position().distanceToSqr(siteCenter),
@@ -582,6 +585,18 @@ public final class MissionWorldDirector {
             ServerLevel level,
             ActiveMission mission,
             String tag) {
+        return findTaggedZombies(
+                level,
+                mission,
+                tag,
+                ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+    }
+
+    private static List<Zombie> findTaggedZombies(
+            ServerLevel level,
+            ActiveMission mission,
+            String tag,
+            int limit) {
         List<Zombie> living = new ArrayList<>();
         AABB bounds = AABB.ofSize(
                 Vec3.atCenterOf(mission.site()),
@@ -595,7 +610,7 @@ public final class MissionWorldDirector {
                         && !zombie.isRemoved()
                         && zombie.getTags().contains(tag),
                 living,
-                ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK);
+                limit);
         return living;
     }
 
@@ -715,9 +730,13 @@ public final class MissionWorldDirector {
             }
             case ZOMBIE_BLOCKADE -> {
                 String tag = missionEntityTag(mission);
-                List<Zombie> living = findTaggedZombies(level, mission, tag);
+                List<Zombie> living = findTaggedZombies(
+                        level,
+                        mission,
+                        tag,
+                        ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK);
                 living.forEach(Zombie::discard);
-                if (living.size() >= ZombieBlockadePolicy.MAX_SCAN_RESULTS_PER_TICK) {
+                if (living.size() >= ZombieBlockadePolicy.MAX_DISCARDS_PER_TICK) {
                     return false;
                 }
             }
